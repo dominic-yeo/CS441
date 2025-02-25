@@ -18,7 +18,19 @@ NODE_PORT = {
 # The router’s fixed port for inter-subnet traffic
 ROUTER_PORT = 10000
 
-SOURCE_MAC = ""
+SOURCE_MAC = input("Enter node MAC address (e.g., N1, N2, or N3): ").strip()
+
+FIREWALL_BLOCK = set()
+while(True):
+
+    add_rule = input("Do you want to add a firewall rule? (e.g. block 2B): ").strip()
+    firewall_tokens = add_rule.split(" ")
+    if firewall_tokens[0] == "block":
+        # In our simulation, Node2's MAC is N2.
+        FIREWALL_BLOCK.add(firewall_tokens[1])
+        print("Firewall rule added: Blocking packets from "+ firewall_tokens[1])
+    else:
+        break
 
 def handle_client(conn, addr):
     """Handle incoming connections."""
@@ -28,7 +40,7 @@ def handle_client(conn, addr):
         if not data:
             break  # Connection closed.
         decoded_data = data.decode('utf-8')
-        print(f"Received: {decoded_data}")
+        print(f"[LOG]: Received: {decoded_data}")
         logical_receive_data(decoded_data)
     conn.close()
 
@@ -39,12 +51,20 @@ def logical_receive_data(data):
     if len(tokens) < 5:
         print("Malformed packet; dropping.")
         return
+    frame_src_ip = tokens[0]
+    if frame_src_ip in FIREWALL_BLOCK:
+        print(f"[Firewall] Packet from {frame_src_ip} blocked by firewall.")
+        return
     # For demonstration, simply print if the frame destination matches our MAC.
     frame_tokens = tokens[4:]
     if len(frame_tokens) < 4:
         print("Malformed frame; dropping.")
         return
     frame_dest_mac = frame_tokens[1]
+    frame_src_mac = frame_tokens[0]
+
+
+    
     if frame_dest_mac == SOURCE_MAC:
         print("Packet accepted: " + data)
     else:
@@ -70,7 +90,7 @@ def send_data(target_port, message, target_host='localhost'):
         try:
             s.connect((target_host, target_port))
             s.sendall(message.encode('utf-8'))
-            print(f"Sent: '{message}' to {target_host}:{target_port}")
+            print(f"[LOG]: Sent: '{message}' to {target_host}:{target_port}")
         except Exception as e:
             print(f"Error sending data: {e}")
 
@@ -111,7 +131,6 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
 
 if __name__ == '__main__':
     # Ask the user for the node's MAC address.
-    SOURCE_MAC = input("Enter node MAC address (e.g., N1, N2, or N3): ").strip()
     ip = ""
     bind_port = 0
     if SOURCE_MAC == "N1":
