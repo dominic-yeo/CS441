@@ -61,8 +61,6 @@ def logical_receive_data(data):
         print("Malformed frame; dropping.")
         return
     frame_dest_mac = frame_tokens[1]
-    frame_src_mac = frame_tokens[0]
-
 
     
     if frame_dest_mac == SOURCE_MAC:
@@ -115,8 +113,15 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
             print("Destination port unknown; dropping.")
             return
         # Construct the frame and packet.
-        frame = source_mac + " | " + dest_mac + " | " + str(len(message)) + " | " + message
-        packet = source_ip + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
+        #if spoofed packet
+        spoofed = message.split("-s")
+        if len(spoofed) == 2:
+            spoof_data = spoofed[1].split(" ")
+            frame = spoof_data[0] + " | " + dest_mac + " | " + str(len(spoofed[0])) + " | " + spoofed[0]
+            packet = spoof_data[1] + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
+        else: 
+            frame = source_mac + " | " + dest_mac + " | " + str(len(message)) + " | " + message
+            packet = source_ip + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
         for i in target_ports:
             send_data(i, packet)
     else:
@@ -125,8 +130,14 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
         # For nodes in subnet1, router interface is R1; for subnet2, it is R2.
         router_interface = "R1" if source_ip[0] == "1" else "R2"
         # The destination MAC in the frame will be set to the router's interface.
-        frame = source_mac + " | " + router_interface + " | " + str(len(message)) + " | " + message
-        packet = source_ip + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
+        spoofed = message.split("-s")
+        if len(spoofed) == 2:
+            spoof_data = spoofed[1].split(" ")
+            frame = spoof_data[0] + " | " + router_interface + " | " + str(len(spoofed[0])) + " | " + spoofed[0]
+            packet = spoof_data[1] + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
+        else: 
+            frame = source_mac + " | " + router_interface + " | " + str(len(message)) + " | " + message
+            packet = source_ip + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
         send_data(ROUTER_PORT, packet)
 
 if __name__ == '__main__':
