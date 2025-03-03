@@ -43,7 +43,6 @@ def handle_client(conn, addr):
         print(f"[LOG]: Received: {decoded_data}")
         logical_receive_data(decoded_data)
     conn.close()
-
 def logical_receive_data(data):
     # Packet format: source_ip | dest_ip | 0x00 | <frame_length> | <frame>
     # Frame format: source_mac | dest_mac | <msg_length> | <message>
@@ -51,22 +50,35 @@ def logical_receive_data(data):
     if len(tokens) < 5:
         print("Malformed packet; dropping.")
         return
-    frame_src_ip = tokens[0]
-    if frame_src_ip in FIREWALL_BLOCK:
-        print(f"[Firewall] Packet from {frame_src_ip} blocked by firewall.")
-        return
-    # For demonstration, simply print if the frame destination matches our MAC.
+    
+    frame_src_ip = tokens[0]  # Extract sender's IP
+    dest_ip = tokens[1]        # Destination IP
     frame_tokens = tokens[4:]
+    
     if len(frame_tokens) < 4:
         print("Malformed frame; dropping.")
         return
-    frame_dest_mac = frame_tokens[1]
-
     
+    frame_src_mac = frame_tokens[0]  # Extract sender's MAC
+    frame_dest_mac = frame_tokens[1] # Extract recipient's MAC
+    message = frame_tokens[3]        # Extract message
+
+    # Firewall check
+    if frame_src_ip in FIREWALL_BLOCK:
+        print(f"[Firewall] Packet from {frame_src_ip} blocked.")
+        return
+
     if frame_dest_mac == SOURCE_MAC:
-        print("Packet accepted: " + data)
+        print(f"Packet received from {frame_src_ip}: {message}")
+        
+        # **Avoid Infinite Loop - Do not reply to a reply**
+        if "[PING REPLY]" not in message:
+            reply_message = f"[PING REPLY] {message}"
+            logical_send_data(dest_ip, SOURCE_MAC, frame_src_ip, reply_message)
     else:
         print("Packet not addressed to me; dropped.")
+
+
 
 def start_server(bind_port, host='0.0.0.0'):
     """Start a TCP server on the given port."""
@@ -139,6 +151,8 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
             frame = source_mac + " | " + router_interface + " | " + str(len(message)) + " | " + message
             packet = source_ip + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
         send_data(ROUTER_PORT, packet)
+
+
 
 if __name__ == '__main__':
     # Ask the user for the node's MAC address.
