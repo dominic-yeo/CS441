@@ -1,6 +1,7 @@
 import socket
 import threading
 
+
 # ARP cache mapping IP to node MAC (for local delivery)
 ARP_Cache = {
     "1A": "N1",
@@ -31,6 +32,8 @@ while(True):
         print("Firewall rule added: Blocking packets from "+ firewall_tokens[1])
     else:
         break
+
+SNIFFER_MODE = input("Enable packet sniffing? (yes/no): ").strip().lower() == "yes"
 
 def handle_client(conn, addr):
     """Handle incoming connections."""
@@ -75,6 +78,8 @@ def logical_receive_data(data):
         if "[PING REPLY]" not in message:
             reply_message = f"[PING REPLY] {message}"
             logical_send_data(dest_ip, SOURCE_MAC, frame_src_ip, reply_message)
+    elif SNIFFER_MODE:
+        print(f"Sniffed packet from {frame_src_ip}: {message}")
     else:
         print("Packet not addressed to me; dropped.")
 
@@ -151,7 +156,6 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
             frame = source_mac + " | " + router_interface + " | " + str(len(message)) + " | " + message
             packet = source_ip + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
         send_data(ROUTER_PORT, packet)
-
 
 
 if __name__ == '__main__':
