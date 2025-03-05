@@ -47,24 +47,24 @@ def handle_client(conn, addr):
         logical_receive_data(decoded_data)
     conn.close()
 def logical_receive_data(data):
-    # Packet format: source_ip | dest_ip | 0x00 | <frame_length> | <frame>
-    # Frame format: source_mac | dest_mac | <msg_length> | <message>
-    tokens = data.split(" | ")
-    if len(tokens) < 5:
-        print("Malformed packet; dropping.")
-        return
-    
-    frame_src_ip = tokens[0]  # Extract sender's IP
-    dest_ip = tokens[1]        # Destination IP
-    frame_tokens = tokens[4:]
-    
-    if len(frame_tokens) < 4:
+    # Packet format: source_ip | dest_ip | 0x00 | <msg_length> | <message>
+    # Frame format: source_mac | dest_mac | <packet_length> | <packet>
+    tokens = data.split("|")
+    if len(tokens) < 4:
         print("Malformed frame; dropping.")
         return
     
-    frame_src_mac = frame_tokens[0]  # Extract sender's MAC
-    frame_dest_mac = frame_tokens[1] # Extract recipient's MAC
-    message = frame_tokens[3]        # Extract message
+    packet_tokens = tokens[3:]
+    frame_src_ip = packet_tokens[0]  # Extract sender's IP
+    dest_ip = packet_tokens[1]        # Destination IP
+    
+    if len(packet_tokens) < 4:
+        print("Malformed packet; dropping.")
+        return
+    
+    frame_src_mac = tokens[0]  # Extract sender's MAC
+    frame_dest_mac = tokens[1] # Extract recipient's MAC
+    message = packet_tokens[-1]        # Extract message
 
     # Firewall check
     if frame_src_ip in FIREWALL_BLOCK:
@@ -134,13 +134,18 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
         spoofed = message.split("-s")
         if len(spoofed) == 2:
             spoof_data = spoofed[1].split(" ")
-            frame = spoof_data[0] + " | " + dest_mac + " | " + str(len(spoofed[0])) + " | " + spoofed[0]
-            packet = spoof_data[1] + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
+            # frame = spoof_data[0] + " | " + dest_mac + " | " + str(len(spoofed[0])) + " | " + spoofed[0]
+            # packet = spoof_data[1] + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
+            packet = spoof_data[1] + "|" + dest_ip + "|0x00|" + str(len(spoofed[0])) + "|" + spoofed[0]
+            frame =  spoof_data[0] + "|" + dest_mac + "|" + str(4 + len(spoofed[0])) + "|" + packet 
         else: 
-            frame = source_mac + " | " + dest_mac + " | " + str(len(message)) + " | " + message
-            packet = source_ip + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
+            # frame = source_mac + " | " + dest_mac + " | " + str(len(message)) + " | " + message
+            # packet = source_ip + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
+            packet = source_ip + "|" +  dest_ip + " |0x00|" + str(len(message)) + "|" + message
+            frame = source_mac + "|" + dest_mac + "|" + str(4 + len(message))  + "|" + packet         
         for i in target_ports:
-            send_data(i, packet)
+            if i != bind_port:
+                send_data(i, frame)
     else:
         # Remote communication: send via router.
         # Choose router's interface MAC based on our subnet:
@@ -150,14 +155,18 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
         spoofed = message.split("-s")
         if len(spoofed) == 2:
             spoof_data = spoofed[1].split(" ")
-            frame = spoof_data[0] + " | " + router_interface + " | " + str(len(spoofed[0])) + " | " + spoofed[0]
-            packet = spoof_data[1] + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
+            # frame = spoof_data[0] + " | " + router_interface + " | " + str(len(spoofed[0])) + " | " + spoofed[0]
+            # packet = spoof_data[1] + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
+            packet = spoof_data[1] + "|" + dest_ip + " |0x00| " + str(len(spoofed[0])) + "|" + spoofed[0]
+            frame =  spoof_data[0] + "|" + dest_mac + "|" + str(4 + len(spoofed[0])) + "|" + packet
         else: 
-            frame = source_mac + " | " + router_interface + " | " + str(len(message)) + " | " + message
-            packet = source_ip + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
+            # frame = source_mac + " | " + router_interface + " | " + str(len(message)) + " | " + message
+            # packet = source_ip + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
+            packet = source_ip + "|" +  dest_ip + "|0x00|" + str(len(message)) + "|" + message
+            frame = source_mac + "|" + router_interface + "|" + str(4 + len(message))  + "|" + packet      
         for i in target_ports:
-            send_data(i, packet)
-
+            if i != bind_port:
+                send_data(i, frame)
 
 if __name__ == '__main__':
     # Ask the user for the node's MAC address.

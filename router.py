@@ -32,27 +32,30 @@ def send_data(target_port, message, target_host='localhost'):
 def router_forward(packet):
     """
     Process a packet received on the router.
-    Packet format: source_ip | dest_ip | 0x00 | <frame_length> | <frame>
-    Frame format: source_mac | dest_mac | <msg_length> | <message>
+    Packet format: source_ip | dest_ip | 0x00 | <msg_length> | <message>
+    Frame format: source_mac | dest_mac | <packet_length> | <packet>
     """
-    tokens = packet.split(" | ")
-    if len(tokens) < 5:
+    tokens = packet.split("|")
+    if len(tokens) < 4:
+        print("[Router] Malformed frame; dropping.")
+        return
+    
+    # source_ip, dest_ip, protocol, frame_length = tokens[0:4]
+    # frame_tokens = tokens[4:]
+    source_mac, dest_mac, packet_length = tokens[0:3]
+    packet_tokens = tokens[3:]
+    if len(packet_tokens) < 5:
         print("[Router] Malformed packet; dropping.")
         return
 
-    source_ip, dest_ip, protocol, frame_length = tokens[0:4]
-    frame_tokens = tokens[4:]
-    if len(frame_tokens) < 4:
-        print("[Router] Malformed frame; dropping.")
-        return
-
-    frame_src_mac, frame_dest_mac, msg_length, message = frame_tokens[0:4]
+    # frame_src_mac, frame_dest_mac, msg_length, message = frame_tokens[0:4]
+    source_ip, dest_ip, protocol, msg_length, message = packet_tokens[0:5]
     # Determine on which logical interface this packet arrived by checking the frame destination.
-    if frame_dest_mac not in (ROUTER_MAC_R1, ROUTER_MAC_R2):
+    if dest_mac not in (ROUTER_MAC_R1, ROUTER_MAC_R2):
         print(f"[Router] Packet not addressed to router interfaces; dropping.")
         return
 
-    incoming_interface = frame_dest_mac
+    incoming_interface = dest_mac
 
     # Decide on the outgoing interface based on destination IP.
     if dest_ip[0] == "1":
@@ -72,9 +75,12 @@ def router_forward(packet):
         return
 
     # Update the frame: set source MAC to the router's outgoing interface and destination to the node's MAC.
-    new_frame = out_interface + " | " + dest_node_mac + " | " + str(len(message)) + " | " + message
-    new_packet = source_ip + " | " + dest_ip + " | " + protocol + " | " + str(len(new_frame)) + " | " + new_frame
-
+    # new_frame = out_interface + " | " + dest_node_mac + " | " + str(len(message)) + " | " + message
+    # new_packet = source_ip + " | " + dest_ip + " | " + protocol + " | " + str(len(new_frame)) + " | " + new_frame
+    tokens[0] = out_interface
+    tokens[1] = dest_node_mac
+    new_packet = "|".join(tokens)
+    
     print(f"[Router] Forwarding packet from interface {incoming_interface} to {out_interface}")
     # Flood the updated packet to all nodes in the target subnet.
     for port in target_nodes:
