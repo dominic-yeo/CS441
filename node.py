@@ -141,7 +141,7 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
         else: 
             # frame = source_mac + " | " + dest_mac + " | " + str(len(message)) + " | " + message
             # packet = source_ip + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
-            packet = source_ip + "|" +  dest_ip + " |0x00|" + str(len(message)) + "|" + message
+            packet = source_ip + "|" +  dest_ip + "|0x00|" + str(len(message)) + "|" + message
             frame = source_mac + "|" + dest_mac + "|" + str(4 + len(message))  + "|" + packet         
         for i in target_ports:
             if i != bind_port:
