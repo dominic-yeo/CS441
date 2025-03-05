@@ -49,7 +49,7 @@ def handle_client(conn, addr):
 def logical_receive_data(data):
     # Packet format: source_ip | dest_ip | 0x00 | <msg_length> | <message>
     # Frame format: source_mac | dest_mac | <packet_length> | <packet>
-    tokens = data.split("|")
+    tokens = data.split(" | ")
     if len(tokens) < 4:
         print("Malformed frame; dropping.")
         return
@@ -136,13 +136,13 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
             spoof_data = spoofed[1].split(" ")
             # frame = spoof_data[0] + " | " + dest_mac + " | " + str(len(spoofed[0])) + " | " + spoofed[0]
             # packet = spoof_data[1] + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
-            packet = spoof_data[1] + "|" + dest_ip + "|0x00|" + str(len(spoofed[0])) + "|" + spoofed[0]
-            frame =  spoof_data[0] + "|" + dest_mac + "|" + str(4 + len(spoofed[0])) + "|" + packet 
+            packet = spoof_data[1] + " | " + dest_ip + " | 0x00 |" + str(len(spoofed[0])) + " | " + spoofed[0]
+            frame =  spoof_data[0] + " | " + dest_mac + " | " + str(4 + len(spoofed[0])) + " | " + packet 
         else: 
             # frame = source_mac + " | " + dest_mac + " | " + str(len(message)) + " | " + message
             # packet = source_ip + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
-            packet = source_ip + "|" +  dest_ip + "|0x00|" + str(len(message)) + "|" + message
-            frame = source_mac + "|" + dest_mac + "|" + str(4 + len(message))  + "|" + packet         
+            packet = source_ip + " | " +  dest_ip + " | 0x00 | " + str(len(message)) + " | " + message
+            frame = source_mac + " | " + dest_mac + " | " + str(4 + len(message))  + " | " + packet         
         for i in target_ports:
             if i != bind_port:
                 send_data(i, frame)
@@ -157,13 +157,13 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
             spoof_data = spoofed[1].split(" ")
             # frame = spoof_data[0] + " | " + router_interface + " | " + str(len(spoofed[0])) + " | " + spoofed[0]
             # packet = spoof_data[1] + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
-            packet = spoof_data[1] + "|" + dest_ip + " |0x00| " + str(len(spoofed[0])) + "|" + spoofed[0]
-            frame =  spoof_data[0] + "|" + dest_mac + "|" + str(4 + len(spoofed[0])) + "|" + packet
+            packet = spoof_data[1] + " | " + dest_ip + " | 0x00 | " + str(len(spoofed[0])) + " | " + spoofed[0]
+            frame =  spoof_data[0] + " | " + dest_mac + " | " + str(4 + len(spoofed[0])) + " | " + packet
         else: 
             # frame = source_mac + " | " + router_interface + " | " + str(len(message)) + " | " + message
             # packet = source_ip + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
-            packet = source_ip + "|" +  dest_ip + "|0x00|" + str(len(message)) + "|" + message
-            frame = source_mac + "|" + router_interface + "|" + str(4 + len(message))  + "|" + packet      
+            packet = source_ip + " | " +  dest_ip + " | 0x00 | " + str(len(message)) + " | " + message
+            frame = source_mac + " | " + router_interface + " | " + str(4 + len(message))  + " | " + packet      
         for i in target_ports:
             if i != bind_port:
                 send_data(i, frame)

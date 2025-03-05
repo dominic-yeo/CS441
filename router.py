@@ -35,7 +35,7 @@ def router_forward(packet):
     Packet format: source_ip | dest_ip | 0x00 | <msg_length> | <message>
     Frame format: source_mac | dest_mac | <packet_length> | <packet>
     """
-    tokens = packet.split("|")
+    tokens = packet.split(" | ")
     if len(tokens) < 4:
         print("[Router] Malformed frame; dropping.")
         return
@@ -79,7 +79,7 @@ def router_forward(packet):
     # new_packet = source_ip + " | " + dest_ip + " | " + protocol + " | " + str(len(new_frame)) + " | " + new_frame
     tokens[0] = out_interface
     tokens[1] = dest_node_mac
-    new_packet = "|".join(tokens)
+    new_packet = " | ".join(tokens)
     
     print(f"[Router] Forwarding packet from interface {incoming_interface} to {out_interface}")
     # Flood the updated packet to all nodes in the target subnet.
