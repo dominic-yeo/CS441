@@ -43,7 +43,7 @@ def handle_client(conn, addr):
         if not data:
             break  # Connection closed.
         decoded_data = data.decode('utf-8')
-        print(f"[LOG]: Received: {decoded_data}")
+        # print(f"[LOG]: Received: {decoded_data}")
         logical_receive_data(decoded_data)
     conn.close()
 def logical_receive_data(data):
@@ -105,7 +105,7 @@ def send_data(target_port, message, target_host='localhost'):
         try:
             s.connect((target_host, target_port))
             s.sendall(message.encode('utf-8'))
-            print(f"[LOG]: Sent: '{message}' to {target_host}:{target_port}")
+            # print(f"[LOG]: Sent: '{message}' to {target_host}:{target_port}")
         except Exception as e:
             print(f"Error sending data: {e}")
 
@@ -155,7 +155,8 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
         else: 
             frame = source_mac + " | " + router_interface + " | " + str(len(message)) + " | " + message
             packet = source_ip + " | " + dest_ip + " | 0x00 | " + str(len(frame)) + " | " + frame
-        send_data(ROUTER_PORT, packet)
+        for i in target_ports:
+            send_data(i, packet)
 
 
 if __name__ == '__main__':
