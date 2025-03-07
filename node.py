@@ -21,10 +21,27 @@ NODE_PORT = {
 ROUTER_PORT = 10000
 
 # Store infected nodes to prevent reinfection loops
-INFECTED_NODES = set()
+INFECTED = False
 
 SOURCE_MAC = input("Enter node MAC address (e.g., N1, N2, or N3): ").strip()
 
+# Ask the user for the node's MAC address.
+SOURCE_IP = ""
+bind_port = 0
+if SOURCE_MAC == "N1":
+    SOURCE_IP = "1A"
+    bind_port = NODE_PORT["N1"]
+elif SOURCE_MAC == "N2":
+    SOURCE_IP = "2A"
+    bind_port = NODE_PORT["N2"]
+elif SOURCE_MAC == "N3":
+    SOURCE_IP = "2B"
+    bind_port = NODE_PORT["N3"]
+else:
+    print("Unknown MAC address. Exiting.")
+    exit(1)
+
+BOTNET = set()
 FIREWALL_BLOCK = set()
 while True:
     add_rule = input("Do you want to add a firewall rule? (e.g., block 2B): ").strip()
@@ -40,7 +57,7 @@ SNIFFER_MODE = input("Enable packet sniffing? (yes/no): ").strip().lower() == "y
 
 def handle_client(conn, addr):
     """Handle incoming connections."""
-    print(f"Connected by {addr}")
+    # print(f"Connected by {addr}")
     while True:
         data = conn.recv(1024)
         if not data:
@@ -51,6 +68,7 @@ def handle_client(conn, addr):
 
 
 def logical_receive_data(data):
+    global INFECTED
     """Process received packets and detect worm propagation."""
     tokens = data.split(" | ")
     if len(tokens) < 4:
@@ -69,21 +87,28 @@ def logical_receive_data(data):
         return
 
     # 🛑 Only print if the message is for ME
-    if dest_ip != ip:
+    if dest_ip != SOURCE_IP:
         return  # Ignore messages not meant for this node
 
+    if "DDoS" in message and INFECTED:
+        while(True):
+            logical_send_data(SOURCE_IP, SOURCE_MAC, message.split(" ")[1], "you are under attack please crash")
     # Worm detection & propagation
-    if "[WORM]" in message:
-        if dest_ip in INFECTED_NODES:
-            print(f"[!] Worm attempted from {frame_src_ip}, but {dest_ip} is already infected!")
-            return  # Ignore duplicate infections
-
+    if "[WORM]" in message and INFECTED == False:
+        if SOURCE_IP in message:
+            return
+        print(message)
+        INFECTED = True
         print(f"[!] Worm detected from {frame_src_ip}! {dest_ip} is now infected!")
-        INFECTED_NODES.add(dest_ip)
-
         # Spread the worm only once
-        propagate_worm(dest_ip)
+        propogator = message.split("BY ")
+        logical_send_data(SOURCE_IP, SOURCE_MAC, propogator[1], SOURCE_IP + " successfully infected.")
+        propagate_worm(propogator[1])
 
+    if "successfully infected" in message:
+        BOTNET.add(message.split(" ")[0])
+        print("Current Botnet:" )
+        print(BOTNET)
     if frame_dest_mac == SOURCE_MAC:
         print(f"Packet received from {frame_src_ip}: {message}")
     elif SNIFFER_MODE and "[PING REPLY]" not in message:
@@ -94,14 +119,15 @@ def logical_receive_data(data):
 
 
 
-def propagate_worm(source_ip):
+def propagate_worm(propogator):
     """Spread the worm to all available nodes, avoiding redundant infections."""
     for target_ip in ARP_Cache.keys():
-        if target_ip not in INFECTED_NODES:  # Avoid reinfecting the same node
-            INFECTED_NODES.add(target_ip)  # Mark as infected before sending
-            time.sleep(random.uniform(0.5, 2.0))  # Add delay for realism
-            print(f"[!] Spreading worm to {target_ip}...")
-            logical_send_data(source_ip, SOURCE_MAC, target_ip, "[WORM] INFECTED!")
+        if target_ip == SOURCE_IP:
+            continue
+        time.sleep(random.uniform(0.5, 2.0))  # Add delay for realism
+        print(f"[!] Spreading worm to {target_ip}...")
+        logical_send_data(SOURCE_IP, SOURCE_MAC, target_ip, "[WORM] INFECTED BY " + propogator)
+
 
 
 def start_server(bind_port, host='0.0.0.0'):
@@ -162,23 +188,9 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
 
 
 if __name__ == '__main__':
-    # Ask the user for the node's MAC address.
-    ip = ""
-    bind_port = 0
-    if SOURCE_MAC == "N1":
-        ip = "1A"
-        bind_port = NODE_PORT["N1"]
-    elif SOURCE_MAC == "N2":
-        ip = "2A"
-        bind_port = NODE_PORT["N2"]
-    elif SOURCE_MAC == "N3":
-        ip = "2B"
-        bind_port = NODE_PORT["N3"]
-    else:
-        print("Unknown MAC address. Exiting.")
-        exit(1)
 
-    print("Assigned IP: " + ip)
+ 
+    print("Assigned IP: " + SOURCE_IP)
     # Start the node's server.
     threading.Thread(target=start_server, args=(bind_port,), daemon=True).start()
 
@@ -192,11 +204,14 @@ if __name__ == '__main__':
 
         if user_input.lower() == "release worm":
             print("[!] Releasing worm from this node...")
-            INFECTED_NODES.add(ip)  # Mark current node as infected
-            propagate_worm(ip)
+            print("[!] Once you have acquired a botnet, type 'DDoS <IP>' to execute DDoS")
+            propagate_worm(SOURCE_IP)
+        elif "DDoS" in user_input:
+            for ip in BOTNET:
+                logical_send_data(SOURCE_IP, SOURCE_MAC, ip, "DDoS " + user_input.split(" ")[1])
         else:
             try:
                 dest_ip, message = user_input.split(' ', 1)
-                logical_send_data(ip, SOURCE_MAC, dest_ip, message)
+                logical_send_data(SOURCE_IP, SOURCE_MAC, dest_ip, message)
             except ValueError:
                 print("Invalid input. Please type '<dest_ip> <data>'.")
