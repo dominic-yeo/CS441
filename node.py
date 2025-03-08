@@ -69,12 +69,17 @@ def handle_client(conn, addr):
 
 def logical_receive_data(data):
     global INFECTED
-    """Process received packets and detect worm propagation."""
+    """
+    Process received packets and detect worm propagation.
+    Also check for ARP spoofing messages
+    Packet format (frame): source_mac | dest_mac | <frame_length> | source_ip | dest_ip | 0x00 | <msg_length> | <message>
+    """
     tokens = data.split(" | ")
     if len(tokens) < 4:
         print("Malformed frame; dropping.")
         return
 
+    # Extract fields from frame
     frame_src_ip = tokens[3]  # Sender's IP
     dest_ip = tokens[4]       # Destination IP
     frame_src_mac = tokens[0]  # Sender's MAC
@@ -86,8 +91,24 @@ def logical_receive_data(data):
         print(f"[Firewall] Packet from {frame_src_ip} blocked.")
         return
 
+    # Process ARP spoofing messages regardless of destination to simulate a realistic ARP poisoning attack where malicious ARP replies are brodcasted
+    if message.startswith("[ARP SPOOF]"):
+        # Expected format: "[ARP SPOOF] <IP> <MAC>"
+        tokens_spoof = message.split(" ")
+        if len(tokens_spoof) >= 4:
+            spoof_target_ip = tokens_spoof[2]
+            spoof_fake_mac = tokens_spoof[3]
+            # Do not update ARP cache if it is our own entry
+            if spoof_target_ip == SOURCE_IP:
+                print(f"[ARP SPOOF] Received spoof message for my own IP ({SOURCE_IP}); ignoring.")
+            else:
+                ARP_Cache[spoof_target_ip] = spoof_fake_mac
+                print(f"[ARP SPOOF] ARP cache updated: {spoof_target_ip} now maps to {spoof_fake_mac}")
+        return
+            
+
     # 🛑 Only print if the message is for ME
-    if dest_ip != SOURCE_IP:
+    if not SNIFFER_MODE and frame_dest_mac != SOURCE_MAC:
         return  # Ignore messages not meant for this node
 
     if "DDoS" in message and INFECTED:
@@ -156,12 +177,33 @@ def send_data(target_port, message, target_host='localhost'):
 
 
 def logical_send_data(source_ip, source_mac, dest_ip, message):
-    """Build and send packets in the correct format."""
-    target_ports = [8000, 10000]
-    if source_ip[0] == "2":
-        target_ports = [9000, 9001, 10000]
+    """Build and send packets in the correct format, handling ARP spoof messages specially."""
+    # Determine local broadcast ports based on the sender's subnet.
+    if source_ip[0] == "1":
+        local_ports = [8000, 10000]
+    else:
+        local_ports = [9000, 9001, 10000]
 
-    if dest_ip[0] == source_ip[0]:  # Local subnet
+    # Special handling for ARP spoof messages.
+    if message.startswith("[ARP SPOOF]"):
+        protocol_field = "ARP"
+        packet = f"{source_ip} | {dest_ip} | {protocol_field} | {len(message)} | {message}"
+        if dest_ip[0] == source_ip[0]:
+            dest_mac = ARP_Cache.get(dest_ip, "Unknown")
+            if dest_mac == "Unknown":
+                print("Destination IP not in ARP cache; dropping.")
+                return
+            frame = f"{source_mac} | {dest_mac} | {4 + len(message)} | {packet}"
+        else:
+            router_interface = "R1" if source_ip[0] == "1" else "R2"
+            frame = f"{source_mac} | {router_interface} | {4 + len(message)} | {packet}"
+        for port in local_ports:
+            if port != bind_port:
+                send_data(port, frame)
+        return
+
+    # Normal processing for non-ARP spoof messages.
+    if dest_ip[0] == source_ip[0]:  # Local communication.
         dest_mac = ARP_Cache.get(dest_ip, "Unknown")
         if dest_mac == "Unknown":
             print("Destination IP not in ARP cache; dropping.")
@@ -170,21 +212,27 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
         if not dest_port:
             print("Destination port unknown; dropping.")
             return
-
         packet = f"{source_ip} | {dest_ip} | 0x00 | {len(message)} | {message}"
         frame = f"{source_mac} | {dest_mac} | {4 + len(message)} | {packet}"
         
-        for i in target_ports:
-            if i != bind_port:
-                send_data(i, frame)
-    else:  # Remote communication via router
+        # Check if the destination port (from ARP cache) is within our local broadcast ports.
+        # If not, ARP spoofing has redirected the destination, so send directly.
+        if dest_port not in local_ports:
+            print(f"Directly sending to port {dest_port} (spoofed destination).")
+            send_data(dest_port, frame)
+        else:
+            # Otherwise, broadcast to the local subnet (excluding our own port).
+            for port in local_ports:
+                if port != bind_port:
+                    send_data(port, frame)
+    else:  # Remote communication via router.
         router_interface = "R1" if source_ip[0] == "1" else "R2"
         packet = f"{source_ip} | {dest_ip} | 0x00 | {len(message)} | {message}"
         frame = f"{source_mac} | {router_interface} | {4 + len(message)} | {packet}"
-        
-        for i in target_ports:
-            if i != bind_port:
-                send_data(i, frame)
+        for port in local_ports:
+            if port != bind_port:
+                send_data(port, frame)
+
 
 
 if __name__ == '__main__':
@@ -196,6 +244,7 @@ if __name__ == '__main__':
 
     print("Enter messages in the format '<dest_ip> <data>' (e.g., '1A Hello World')")
     print("Type 'release worm' to infect the network.")
+    print("Type 'arpspoof <target_ip> <fake_mac>' to simulate ARP poisoning.")
 
     while True:
         user_input = input("> ").strip()
@@ -209,6 +258,16 @@ if __name__ == '__main__':
         elif "DDoS" in user_input:
             for ip in BOTNET:
                 logical_send_data(SOURCE_IP, SOURCE_MAC, ip, "DDoS " + user_input.split(" ")[1])
+        elif user_input.startswith("arpspoof"):
+            tokens = user_input.split(" ")
+            if len(tokens) != 3:
+                print("Invalid input. Please type 'arpspoof <target_ip> <fake_mac>'.")
+            else:
+                target_ip = tokens[1]
+                fake_mac = tokens[2]
+                message = f"[ARP SPOOF] {target_ip} {fake_mac}"
+                print(f"[ARP SPOOF] Sending spoofed ARP reply to {target_ip}...")
+                logical_send_data(SOURCE_IP, SOURCE_MAC, target_ip, message)
         else:
             try:
                 dest_ip, message = user_input.split(' ', 1)
