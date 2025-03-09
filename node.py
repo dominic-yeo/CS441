@@ -54,6 +54,19 @@ while True:
 
 SNIFFER_MODE = input("Enable packet sniffing? (yes/no): ").strip().lower() == "yes"
 
+WAF_ENABLED = input("Enable Web Application Firewall? (yes/no): ").strip().lower() == "yes"
+
+def waf_filter(message):
+    """
+    A simple WAF filter that detects worm payloads.
+    If a worm signature ("[WORM]") is found, the function returns True to indicate that
+    the packet should be blocked.
+    """
+    if "[WORM]" in message:
+        print("[WAF] Worm signature detected; blocking packet.")
+        return True
+    return False
+
 
 def handle_client(conn, addr):
     """Handle incoming connections."""
@@ -90,6 +103,11 @@ def logical_receive_data(data):
     if frame_src_ip in FIREWALL_BLOCK:
         print(f"[Firewall] Packet from {frame_src_ip} blocked.")
         return
+    
+    # WAF check
+    if WAF_ENABLED and waf_filter(message):
+        if waf_filter(message):
+            return
 
     # Process ARP spoofing messages regardless of destination to simulate a realistic ARP poisoning attack where malicious ARP replies are brodcasted
     if message.startswith("[ARP SPOOF]"):
@@ -114,6 +132,7 @@ def logical_receive_data(data):
     if "DDoS" in message and INFECTED:
         while(True):
             logical_send_data(SOURCE_IP, SOURCE_MAC, message.split(" ")[1], "you are under attack please crash")
+            
     # Worm detection & propagation
     if "[WORM]" in message and INFECTED == False:
         if SOURCE_IP in message:
