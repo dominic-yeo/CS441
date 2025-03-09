@@ -201,6 +201,34 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
             if port != bind_port:
                 send_data(port, frame)
         return
+    
+    # IP Spoofing check
+    if "-ip" in message:
+        parts = message.split(" -ip ")
+        actual_message = parts[0].strip()
+        # Expect the fake IP to be the first token after -ip
+        fake_ip = parts[1].strip().split()[0]
+        spoof_source_ip = fake_ip
+        if dest_ip[0] == source_ip[0]:
+            dest_mac = ARP_Cache.get(dest_ip, "Unknown")
+            if dest_mac == "Unknown":
+                print("Destination IP not in ARP cache; dropping.")
+                return
+            dest_port = NODE_PORT.get(dest_mac, None)
+            if not dest_port:
+                print("Destination port unknown; dropping.")
+                return
+            packet = f"{spoof_source_ip} | {dest_ip} | 0x00 | {len(actual_message)} | {actual_message}"
+            frame = f"{source_mac} | {dest_mac} | {4 + len(actual_message)} | {packet}"
+        else:
+            router_interface = "R1" if source_ip[0] == "1" else "R2"
+            packet = f"{spoof_source_ip} | {dest_ip} | 0x00 | {len(actual_message)} | {actual_message}"
+            frame = f"{source_mac} | {router_interface} | {4 + len(actual_message)} | {packet}"
+        for port in local_ports:
+            if port != bind_port:
+                send_data(port, frame)
+        return
+
 
     # Normal processing for non-ARP spoof messages.
     if dest_ip[0] == source_ip[0]:  # Local communication.
