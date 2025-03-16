@@ -24,8 +24,9 @@ ROUTER_PORT = 10000
 INFECTED = False
 
 #store fragmented message 
-frag_message = []
-
+# frag_message = []
+memory = []
+fmessage = ""
 SOURCE_MAC = input("Enter node MAC address (e.g., N1, N2, or N3): ").strip()
 
 # Ask the user for the node's MAC address.
@@ -85,6 +86,9 @@ def handle_client(conn, addr):
 
 def logical_receive_data(data):
     global INFECTED
+    global fmessage
+    global memory
+    
     """
     Process received packets and detect worm propagation.
     Also check for ARP spoofing messages
@@ -113,16 +117,29 @@ def logical_receive_data(data):
             return
         
     if len(tokens) == 10:
+        #IP packet: source IP | dest IP | protocol | dataLength | flag | offset | payload
         flag = tokens[-3]
+        offset = int(tokens[-2])
         if frame_dest_mac == SOURCE_MAC:
-            frag_message.append(message)
+            if len(fmessage) >= (offset*8):
+                fmessage = fmessage[0:offset*8] + message 
+            else: 
+                print(f"Offset = {offset}, unable to reassemble with previous fragment")
+                memory.append(message)
+            
             if flag == "0": 
-                mergedMsg = "".join(frag_message)
-                print(f"Packet received from {frame_src_ip}: {mergedMsg}")
-                if "[PING REPLY]" not in mergedMsg:
-                    reply_message = "[PING REPLY] " + mergedMsg  
-                    logical_send_data(dest_ip, SOURCE_MAC, frame_src_ip, reply_message)
-                frag_message.clear()
+                if len(memory) > 0:
+                    print(f"Node crashing")
+                    # raise KeyboardInterrupt
+                    fmessage = ""
+                    memory.clear()
+                else:  
+                    print(f"Packet received from {frame_src_ip}: {fmessage}")
+                    
+                    if "[PING REPLY]" not in fmessage:
+                        reply_message = "[PING REPLY] " + fmessage  
+                        logical_send_data(dest_ip, SOURCE_MAC, frame_src_ip, reply_message)
+                    fmessage = ""
         else:
             print("Packet not addressed to me; dropped.")
         return     
@@ -231,16 +248,24 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
     #Max Transmission Unit (MTU) =  256
     MTU = 256 
     #Fragmentation 
-    if (len(message) + 6 > MTU):
+    if (len(message) + 6 > MTU or "[TEARDROP]" in message):
         offSet = (256 - 6)//8 #31
         dest_mac = ARP_Cache.get(dest_ip, "Unknown") if dest_ip[0] == source_ip[0] else ("R1" if source_ip.startswith("1") else "R2")
+        attack = False 
+        if "[TEARDROP]" in message:
+            message = "a"*2000
+            attack = True 
         curPos = 0
         while (curPos < len(message)):
             payload = message[curPos: curPos + (offSet*8)]
             flag = 0 if curPos + (offSet*8) > len(message) else 1
-            
+            os = curPos//8
+            if attack and (curPos == offSet*8):
+                print(f"Original offset value: {offSet}")
+                os = curPos//8 - 1
+                print(f"Adjusted offset value: {os}")
             #IP packet: source IP | dest IP | protocol | dataLength | flag | offset | payload 
-            packet = f"{source_ip} | {dest_ip} | 0x00 | {len(payload)} | {flag} | {curPos//8} | {payload}"
+            packet = f"{source_ip} | {dest_ip} | 0x00 | {len(payload)} | {flag} | {os} | {payload}"
             frame = f"{source_mac} | {dest_mac} | {6 + len(payload)} | {packet}"
             
             for port in local_ports:
@@ -249,6 +274,7 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
             curPos += offSet*8
         return 
 
+    
     # Special handling for ARP spoof messages.
     if message.startswith("[ARP SPOOF]"):
         protocol_field = "ARP"
@@ -340,6 +366,7 @@ if __name__ == '__main__':
     print("Enter messages in the format '<dest_ip> <data>' (e.g., '1A Hello World')")
     print("Type 'release worm' to infect the network.")
     print("Type 'arpspoof <target_ip> <fake_mac>' to simulate ARP poisoning.")
+    print("Type '<target_ip> [TEARDROP]' to simulate Teardrop Attack.")
 
     while True:
         user_input = input("> ").strip()
