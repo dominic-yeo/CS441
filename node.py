@@ -23,6 +23,10 @@ ROUTER_PORT = 10000
 # Store infected nodes to prevent reinfection loops
 INFECTED = False
 
+#store fragmented message 
+# frag_message = []
+memory = []
+fmessage = ""
 SOURCE_MAC = input("Enter node MAC address (e.g., N1, N2, or N3): ").strip()
 
 # Ask the user for the node's MAC address.
@@ -82,6 +86,9 @@ def handle_client(conn, addr):
 
 def logical_receive_data(data):
     global INFECTED
+    global fmessage
+    global memory
+    
     """
     Process received packets and detect worm propagation.
     Also check for ARP spoofing messages
@@ -108,6 +115,34 @@ def logical_receive_data(data):
     if WAF_ENABLED and waf_filter(message):
         if waf_filter(message):
             return
+        
+    if len(tokens) == 10:
+        #IP packet: source IP | dest IP | protocol | dataLength | flag | offset | payload
+        flag = tokens[-3]
+        offset = int(tokens[-2])
+        if frame_dest_mac == SOURCE_MAC:
+            if len(fmessage) >= (offset*8):
+                fmessage = fmessage[0:offset*8] + message 
+            else: 
+                print(f"Offset = {offset}, unable to reassemble with previous fragment")
+                memory.append(message)
+            
+            if flag == "0": 
+                if len(memory) > 0:
+                    print(f"Node crashing")
+                    # raise KeyboardInterrupt
+                    fmessage = ""
+                    memory.clear()
+                else:  
+                    print(f"Packet received from {frame_src_ip}: {fmessage}")
+                    
+                    if "[PING REPLY]" not in fmessage:
+                        reply_message = "[PING REPLY] " + fmessage  
+                        logical_send_data(dest_ip, SOURCE_MAC, frame_src_ip, reply_message)
+                    fmessage = ""
+        else:
+            print("Packet not addressed to me; dropped.")
+        return     
 
     # Process ARP spoofing messages regardless of destination to simulate a realistic ARP poisoning attack where malicious ARP replies are brodcasted
     if message.startswith("[ARP SPOOF]"):
@@ -149,8 +184,15 @@ def logical_receive_data(data):
         BOTNET.add(message.split(" ")[0])
         print("Current Botnet:" )
         print(BOTNET)
+        
+        
     if frame_dest_mac == SOURCE_MAC:
         print(f"Packet received from {frame_src_ip}: {message}")
+        # **Avoid Infinite Loop - Do not reply to a reply**
+        if "[PING REPLY]" not in message:
+            reply_message = f"[PING REPLY] {message}"
+            logical_send_data(dest_ip, SOURCE_MAC, frame_src_ip, reply_message)
+        
     elif SNIFFER_MODE and "[PING REPLY]" not in message:
         print(f"Sniffed packet from {frame_src_ip}: {message}")
     else:
@@ -203,6 +245,36 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
     else:
         local_ports = [9000, 9001, 10000]
 
+    #Max Transmission Unit (MTU) =  256
+    MTU = 256 
+    #Fragmentation 
+    if (len(message) + 6 > MTU or "[TEARDROP]" in message):
+        offSet = (256 - 6)//8 #31
+        dest_mac = ARP_Cache.get(dest_ip, "Unknown") if dest_ip[0] == source_ip[0] else ("R1" if source_ip.startswith("1") else "R2")
+        attack = False 
+        if "[TEARDROP]" in message:
+            message = "a"*2000
+            attack = True 
+        curPos = 0
+        while (curPos < len(message)):
+            payload = message[curPos: curPos + (offSet*8)]
+            flag = 0 if curPos + (offSet*8) > len(message) else 1
+            os = curPos//8
+            if attack and (curPos == offSet*8):
+                print(f"Original offset value: {offSet}")
+                os = curPos//8 - 1
+                print(f"Adjusted offset value: {os}")
+            #IP packet: source IP | dest IP | protocol | dataLength | flag | offset | payload 
+            packet = f"{source_ip} | {dest_ip} | 0x00 | {len(payload)} | {flag} | {os} | {payload}"
+            frame = f"{source_mac} | {dest_mac} | {6 + len(payload)} | {packet}"
+            
+            for port in local_ports:
+                if port != bind_port:
+                    send_data(port, frame)
+            curPos += offSet*8
+        return 
+
+    
     # Special handling for ARP spoof messages.
     if message.startswith("[ARP SPOOF]"):
         protocol_field = "ARP"
@@ -259,6 +331,7 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
         if not dest_port:
             print("Destination port unknown; dropping.")
             return
+        
         packet = f"{source_ip} | {dest_ip} | 0x00 | {len(message)} | {message}"
         frame = f"{source_mac} | {dest_mac} | {4 + len(message)} | {packet}"
         
@@ -272,6 +345,7 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
             for port in local_ports:
                 if port != bind_port:
                     send_data(port, frame)
+                    
     else:  # Remote communication via router.
         router_interface = "R1" if source_ip[0] == "1" else "R2"
         packet = f"{source_ip} | {dest_ip} | 0x00 | {len(message)} | {message}"
@@ -292,6 +366,7 @@ if __name__ == '__main__':
     print("Enter messages in the format '<dest_ip> <data>' (e.g., '1A Hello World')")
     print("Type 'release worm' to infect the network.")
     print("Type 'arpspoof <target_ip> <fake_mac>' to simulate ARP poisoning.")
+    print("Type '<target_ip> [TEARDROP]' to simulate Teardrop Attack.")
 
     while True:
         user_input = input("> ").strip()
