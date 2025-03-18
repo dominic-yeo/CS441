@@ -73,15 +73,52 @@ def waf_filter(message):
 
 
 def handle_client(conn, addr):
-    """Handle incoming connections."""
-    # print(f"Connected by {addr}")
-    while True:
-        data = conn.recv(1024)
-        if not data:
-            break  # Connection closed.
-        decoded_data = data.decode('utf-8')
-        logical_receive_data(decoded_data)
+    """Handle incoming connections for TCP handshake."""
+    print(f"Connected by {addr}")
+
+    # Step 1: Receive SYN
+    syn_msg = conn.recv(1024).decode('utf-8')
+    if syn_msg == "SYN":
+        print("[SERVER] Received SYN, sending SYN-ACK...")
+        conn.sendall("SYN-ACK".encode('utf-8'))
+
+        # Step 3: Receive ACK from Client
+        ack_msg = conn.recv(1024).decode('utf-8')
+        if ack_msg == "ACK":
+            print("[SERVER] Connection established successfully!")
+    
     conn.close()
+
+def tcp_handshake(target_port, target_host='localhost'):
+    """Perform TCP three-way handshake with N2 (server)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.connect((target_host, target_port))
+            
+            # Step 1: Send SYN
+            print("[CLIENT] Sending SYN...")
+            s.sendall("SYN".encode('utf-8'))
+            
+            # Step 2: Receive SYN-ACK
+            syn_ack = s.recv(1024).decode('utf-8')
+            if syn_ack == "SYN-ACK":
+                print("[CLIENT] Received SYN-ACK, sending ACK...")
+                
+                # Step 3: Send ACK
+                s.sendall("ACK".encode('utf-8'))
+                print("[CLIENT] Handshake completed, connection established!")
+
+        except Exception as e:
+            print(f"Error during handshake: {e}")
+
+if SOURCE_MAC in ["N1", "N3"]:  # Allow both N1 and N3 to initiate the handshake
+    target_node = input("\nEnter the target server for TCP handshake (e.g., N2 or type 'skip' to continue): ").strip()
+    if target_node == "N2":
+        tcp_handshake(9000)  # Handshake with N2
+    elif target_node.lower() == "skip":
+        print("Skipping TCP handshake.")
+    else:
+        print("Invalid input. Please enter 'N2' or 'skip'.")
 
 
 def logical_receive_data(data):
@@ -360,8 +397,10 @@ if __name__ == '__main__':
 
  
     print("Assigned IP: " + SOURCE_IP)
+    print("Assigned Mac: " + SOURCE_MAC)
     # Start the node's server.
     threading.Thread(target=start_server, args=(bind_port,), daemon=True).start()
+   
 
     print("Enter messages in the format '<dest_ip> <data>' (e.g., '1A Hello World')")
     print("Type 'release worm' to infect the network.")
