@@ -139,6 +139,9 @@ def logical_receive_data(data):
     frame_src_mac = tokens[0]  # Sender's MAC
     frame_dest_mac = tokens[1]  # Recipient's MAC
     message = tokens[-1]        # Message payload
+    tcp_message = tokens[7:]
+  
+    
 
     # Firewall check
     if frame_src_ip in FIREWALL_BLOCK:
@@ -151,8 +154,8 @@ def logical_receive_data(data):
             return
     
     # Add TCP packet handling
-    if "[TCP]" in message:
-        handle_tcp_packet(frame_src_ip, frame_src_mac, dest_ip, message.replace("[TCP] ", ""))
+    if "[TCP]" in tcp_message[0]:
+        handle_tcp_packet(frame_src_ip, frame_src_mac, dest_ip, tcp_message)
         return
     
     if len(tokens) == 10:
@@ -441,17 +444,14 @@ def tcp_handshake_client(dest_ip, dest_port=80):
 def handle_tcp_packet(src_ip, src_mac, dest_ip, tcp_data):
     """Process received TCP packets and handle the handshake logic."""
     # Parse TCP header
-    tcp_parts = tcp_data.split(" | ")
-    if len(tcp_parts) < 6:
-        print("[TCP] Malformed TCP packet; dropping.")
-        return
     
-    source_port = int(tcp_parts[1])
-    dest_port = int(tcp_parts[2])
-    seq_num = int(tcp_parts[3])
-    ack_num = int(tcp_parts[4])
-    flags = int(tcp_parts[5])
-    data = tcp_parts[6] if len(tcp_parts) > 6 else ""
+    
+    source_port = int(tcp_data[0].replace("[TCP]", ""))
+    dest_port = int(tcp_data[1])
+    seq_num = int(tcp_data[2])
+    ack_num = int(tcp_data[3])
+    flags = int(tcp_data[4])
+    data = tcp_data[5] if len(tcp_data) > 5 else ""
     
     # Print received TCP packet info
     flag_names = []
