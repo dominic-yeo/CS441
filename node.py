@@ -20,6 +20,33 @@ NODE_PORT = {
 # The router’s fixed port for inter-subnet traffic
 ROUTER_PORT = 10000
 
+# TCP flags
+TCP_SYN = 0x02
+TCP_ACK = 0x10
+TCP_SYN_ACK = TCP_SYN | TCP_ACK  # 0x12
+TCP_FIN = 0x01
+TCP_RST = 0x04
+
+# TCP connection states
+TCP_STATE_CLOSED = 0
+TCP_STATE_LISTEN = 1 
+TCP_STATE_SYN_SENT = 2
+TCP_STATE_SYN_RECEIVED = 3
+TCP_STATE_ESTABLISHED = 4
+TCP_STATE_FIN_WAIT_1 = 5
+TCP_STATE_FIN_WAIT_2 = 6
+TCP_STATE_CLOSING = 7
+TCP_STATE_TIME_WAIT = 8
+TCP_STATE_CLOSE_WAIT = 9
+TCP_STATE_LAST_ACK = 10
+
+# TCP connection table: {(source_ip, source_port, dest_ip, dest_port): state}
+tcp_connections = {}
+
+# TCP sequence numbers
+tcp_seq_num = {}
+tcp_ack_num = {}
+
 # Store infected nodes to prevent reinfection loops
 INFECTED = False
 
@@ -28,6 +55,13 @@ INFECTED = False
 memory = []
 fmessage = ""
 SOURCE_MAC = input("Enter node MAC address (e.g., N1, N2, or N3): ").strip()
+
+if SOURCE_MAC == "N2":
+    print("[TCP] Node is in TCP LISTEN state")
+    is_tcp_server = True
+    tcp_listen_port = 80  # Standard HTTP port
+else:
+    is_tcp_server = False
 
 # Ask the user for the node's MAC address.
 SOURCE_IP = ""
@@ -115,7 +149,12 @@ def logical_receive_data(data):
     if WAF_ENABLED and waf_filter(message):
         if waf_filter(message):
             return
-        
+    
+    # Add TCP packet handling
+    if "[TCP]" in message:
+        handle_tcp_packet(frame_src_ip, frame_src_mac, dest_ip, message.replace("[TCP] ", ""))
+        return
+    
     if len(tokens) == 10:
         #IP packet: source IP | dest IP | protocol | dataLength | flag | offset | payload
         flag = tokens[-3]
@@ -354,7 +393,117 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
             if port != bind_port:
                 send_data(port, frame)
 
+def tcp_send(source_ip, source_mac, dest_ip, source_port, dest_port, flags, seq_num=0, ack_num=0, data=""):
+    """Send a TCP packet with the specified flags and data."""
+    # Create TCP header
+    tcp_header = f"{source_port} | {dest_port} | {seq_num} | {ack_num} | {flags}"
+    
+    # Create the complete message with TCP header and data
+    tcp_message = f"[TCP] {tcp_header} | {data}"
+    
+    # Use the existing logical_send_data function to send the TCP message
+    logical_send_data(source_ip, source_mac, dest_ip, tcp_message)
+    
+    # Print debug information
+    flag_names = []
+    if flags & TCP_SYN:
+        flag_names.append("SYN")
+    if flags & TCP_ACK:
+        flag_names.append("ACK")
+    if flags & TCP_FIN:
+        flag_names.append("FIN")
+    if flags & TCP_RST:
+        flag_names.append("RST")
+    
+    flag_str = " + ".join(flag_names) if flag_names else "None"
+    print(f"[TCP] Sent: {source_ip}:{source_port} -> {dest_ip}:{dest_port} [Flags: {flag_str}] [SEQ: {seq_num}] [ACK: {ack_num}]")
+    
+def tcp_handshake_client(dest_ip, dest_port=80):
+    """Initiate a TCP handshake as a client."""
+    if SOURCE_MAC != "N1":
+        print("[TCP] Only N1 can act as TCP client in this simulation")
+        return
+    
+    # Generate initial sequence number (in a real TCP stack this would be random)
+    init_seq = random.randint(1000, 9999)
+    source_port = random.randint(10000, 65535)  # Ephemeral port
+    
+    # Store connection info
+    conn_id = (SOURCE_IP, source_port, dest_ip, dest_port)
+    tcp_connections[conn_id] = TCP_STATE_SYN_SENT
+    tcp_seq_num[conn_id] = init_seq
+    
+    print(f"[TCP] Initiating handshake with {dest_ip}:{dest_port} from port {source_port}")
+    
+    # Send SYN packet (Step 1 of handshake)
+    tcp_send(SOURCE_IP, SOURCE_MAC, dest_ip, source_port, dest_port, TCP_SYN, init_seq, 0)
 
+def handle_tcp_packet(src_ip, src_mac, dest_ip, tcp_data):
+    """Process received TCP packets and handle the handshake logic."""
+    # Parse TCP header
+    tcp_parts = tcp_data.split(" | ")
+    if len(tcp_parts) < 6:
+        print("[TCP] Malformed TCP packet; dropping.")
+        return
+    
+    source_port = int(tcp_parts[1])
+    dest_port = int(tcp_parts[2])
+    seq_num = int(tcp_parts[3])
+    ack_num = int(tcp_parts[4])
+    flags = int(tcp_parts[5])
+    data = tcp_parts[6] if len(tcp_parts) > 6 else ""
+    
+    # Print received TCP packet info
+    flag_names = []
+    if flags & TCP_SYN:
+        flag_names.append("SYN")
+    if flags & TCP_ACK:
+        flag_names.append("ACK")
+    if flags & TCP_FIN:
+        flag_names.append("FIN")
+    if flags & TCP_RST:
+        flag_names.append("RST")
+    
+    flag_str = " + ".join(flag_names) if flag_names else "None"
+    print(f"[TCP] Received: {src_ip}:{source_port} -> {dest_ip}:{dest_port} [Flags: {flag_str}] [SEQ: {seq_num}] [ACK: {ack_num}]")
+    
+    # Handle server-side of handshake (N2)
+    if SOURCE_MAC == "N2" and is_tcp_server:
+        if flags == TCP_SYN:  # Step 1: Client SYN received
+            # Generate server sequence number
+            server_seq = random.randint(1000, 9999)
+            conn_id = (dest_ip, dest_port, src_ip, source_port)
+            
+            # Store connection info
+            tcp_connections[conn_id] = TCP_STATE_SYN_RECEIVED
+            tcp_seq_num[conn_id] = server_seq
+            tcp_ack_num[conn_id] = seq_num + 1
+            
+            # Send SYN-ACK (Step 2 of handshake)
+            tcp_send(dest_ip, SOURCE_MAC, src_ip, dest_port, source_port, TCP_SYN_ACK, server_seq, seq_num + 1)
+        
+        elif flags == TCP_ACK:  # Step 3: Client ACK received
+            conn_id = (dest_ip, dest_port, src_ip, source_port)
+            if conn_id in tcp_connections and tcp_connections[conn_id] == TCP_STATE_SYN_RECEIVED:
+                # Connection is now established
+                tcp_connections[conn_id] = TCP_STATE_ESTABLISHED
+                print(f"[TCP] Connection established with {src_ip}:{source_port}")
+    
+    # Handle client-side of handshake (N1)
+    elif SOURCE_MAC == "N1":
+        if flags == TCP_SYN_ACK:  # Step 2: Server SYN-ACK received
+            conn_id = (dest_ip, dest_port, src_ip, source_port)
+            if conn_id in tcp_connections and tcp_connections[conn_id] == TCP_STATE_SYN_SENT:
+                # Store received sequence number for future ACKs
+                tcp_ack_num[conn_id] = seq_num + 1
+                
+                # Send ACK (Step 3 of handshake)
+                tcp_send(dest_ip, SOURCE_MAC, src_ip, dest_port, source_port, TCP_ACK, 
+                         tcp_seq_num[conn_id] + 1, tcp_ack_num[conn_id])
+                
+                # Connection is now established
+                tcp_connections[conn_id] = TCP_STATE_ESTABLISHED
+                print(f"[TCP] Connection established with {src_ip}:{source_port}")
 
 if __name__ == '__main__':
 
@@ -367,6 +516,7 @@ if __name__ == '__main__':
     print("Type 'release worm' to infect the network.")
     print("Type 'arpspoof <target_ip> <fake_mac>' to simulate ARP poisoning.")
     print("Type '<target_ip> [TEARDROP]' to simulate Teardrop Attack.")
+    print("Type 'tcp connect <dest_ip>' to initiate TCP handshake.")
 
     while True:
         user_input = input("> ").strip()
@@ -380,6 +530,12 @@ if __name__ == '__main__':
         elif "DDoS" in user_input:
             for ip in BOTNET:
                 logical_send_data(SOURCE_IP, SOURCE_MAC, ip, "DDoS " + user_input.split(" ")[1])
+        elif user_input.startswith("tcp connect"):
+            try:
+                _, _, dest_ip = user_input.split()
+                tcp_handshake_client(dest_ip)
+            except ValueError:
+                print("Invalid input. Please type 'tcp connect <dest_ip>'.")        
         elif user_input.startswith("arpspoof"):
             tokens = user_input.split(" ")
             if len(tokens) != 3:
