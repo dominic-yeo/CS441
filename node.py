@@ -465,7 +465,8 @@ def handle_tcp_packet(src_ip, src_mac, dest_ip, tcp_data):
         flag_names.append("RST")
     
     flag_str = " + ".join(flag_names) if flag_names else "None"
-    print(f"[TCP] Received: {src_ip}:{source_port} -> {dest_ip}:{dest_port} [Flags: {flag_str}] [SEQ: {seq_num}] [ACK: {ack_num}]")
+    if SOURCE_MAC == "N2" or SOURCE_MAC == "N1":
+        print(f"[TCP] Received: {src_ip}:{source_port} -> {dest_ip}:{dest_port} [Flags: {flag_str}] [SEQ: {seq_num}] [ACK: {ack_num}]")
     
     # Handle server-side of handshake (N2)
     if SOURCE_MAC == "N2" and is_tcp_server:
