@@ -114,6 +114,11 @@ SNIFFER_MODE = input("Enable packet sniffing? (yes/no): ").strip().lower() == "y
 
 WAF_ENABLED = input("Enable Web Application Firewall? (yes/no): ").strip().lower() == "yes"
 
+SSL_DOWNGRADE = input("Enable SSL downgrade attack? (yes/no): ").strip().lower() == "yes"
+if SSL_DOWNGRADE:
+        print("[!] SSL/TLS downgrade attack enabled")
+        print("[!] The simulation will attempt to force connections to use weaker encryption")
+
 def waf_filter(message):
     """
     A simple WAF filter that detects worm payloads.
@@ -612,21 +617,23 @@ def tls_connection_send(dest_ip, dest_mac, src_port, dest_port):
         "r0": client_random,
         "cipher_suites": ["AES", "RSA", "ECDHE"] #simulated example 
     }
+    
+        
     tcp = f"[TLS] {src_port} | {dest_port} | {json.dumps(payload)}"
     packet = f"{SOURCE_IP} | {dest_ip} | 0x00 | {2 + len(json.dumps(payload))} | {tcp}"
     frame = f"{SOURCE_MAC} | {dest_mac} | {6 + len(json.dumps(payload))} | {packet}"
     
     print(f"[TLS] Sent: {SOURCE_IP}:{src_port} -> {dest_ip}:{dest_port} Client Hello")
+    print(payload["version"])
+    
     send_data(ROUTER_PORT, frame)
     return
 
 def tls_connection_receive(message): 
     tokens = message.split(" | ")
-    # print(f"tokens: {tokens}")
     src_port, dest_port, payload = int(tokens[-3].replace("[TLS]", "")), int(tokens[-2]), json.loads(tokens[-1])
     src_mac, dest_mac, src_ip, dest_ip = tokens[0], tokens[1], tokens[3], tokens[4]
     tls_conn_id = (dest_ip, src_ip, dest_port, src_port)
-    # print(F"tlsconID: {tls_conn_id}")
     
     if dest_ip[0] == "1":
         local_ports = [8000, 10000]
@@ -638,79 +645,134 @@ def tls_connection_receive(message):
             print("Packet not addressed to me; dropped.")
             return
     
-    """
-    tcp = source port | dest port | payload
-    packet = f"{source_ip} | {dest_ip} | 0x00 | 2 + {len(payload)} | {tcp}"
-    frame = f"{source_mac} | {router_interface} | {4 + 2 + len(payload)} | {packet}"
-    """ 
-
+    # Handle ClientHello with potential downgrade
     if payload["type"] == "ClientHello":
         print(f"[TLS] received: {src_ip}:{src_port} -> {dest_ip}:{dest_port} Client Hello")
         r1 = hashlib.sha256(str(random.randint(1, 100000)).encode()).hexdigest()
-        tls_sessions[tls_conn_id] = {
-            "client_random": payload["r0"],
-            "cipher_suite": "AES",
-            "server_random": r1,
-            "premaster_secret": None,
-            "master_secret": None,
-            "keys": None
-        }
-        #Step 2: Server Hello 
-        server_hello = {
-            "type": "ServerHello",
-            "version": "TLS 1.2",
-            "r1": r1,
-            "cipher_suites": "AES"
-        }
+        
+        # Original client settings
+        client_version = payload["version"]
+        client_ciphers = payload["cipher_suites"]
+        
+        # Apply downgrade if enabled
+        if SSL_DOWNGRADE and SOURCE_MAC == "N2":  # Assuming N2 is the attacking node
+            original_version = client_version
+            original_ciphers = client_ciphers
+            
+            # Force downgrade to TLS 1.0 and RSA
+            downgraded_version = "TLS 1.0"
+            downgraded_cipher = "RSA"
+            
+            print(f"[DOWNGRADE] Original TLS version: {original_version} → Downgraded to: {downgraded_version}")
+            print(f"[DOWNGRADE] Original cipher suites: {original_ciphers} → Downgraded to: {downgraded_cipher}")
+            
+            # Store downgraded parameters
+            tls_sessions[tls_conn_id] = {
+                "client_random": payload["r0"],
+                "cipher_suite": downgraded_cipher,
+                "server_random": r1,
+                "premaster_secret": None,
+                "master_secret": None,
+                "keys": None,
+                "original_version": original_version,
+                "original_ciphers": original_ciphers,
+                "downgraded": True,
+                "downgraded_version": downgraded_version
+            }
+            
+            # Send Server Hello with downgraded parameters
+            server_hello = {
+                "type": "ServerHello",
+                "version": downgraded_version,
+                "r1": r1,
+                "cipher_suites": downgraded_cipher
+            }
+        else:
+            # Normal behavior without downgrade
+            tls_sessions[tls_conn_id] = {
+                "client_random": payload["r0"],
+                "cipher_suite": "AES",  # Use strongest cipher by default
+                "server_random": r1,
+                "premaster_secret": None,
+                "master_secret": None,
+                "keys": None,
+                "downgraded": False
+            }
+            
+            # Normal Server Hello
+            server_hello = {
+                "type": "ServerHello",
+                "version": client_version,
+                "r1": r1,
+                "cipher_suites": "AES"  # Use strongest cipher
+            }
        
+        # Send the Server Hello (either normal or downgraded)
         tcp = f"[TLS] {dest_port} | {src_port} | {json.dumps(server_hello)}"
         packet = f"{dest_ip} | {src_ip} | 0x00 | {2+ len(json.dumps(server_hello))} | {tcp}"
         frame = f"{dest_mac} | {src_mac} | {6 + len(json.dumps(server_hello))} | {packet}"  
         print(f"[TLS] Sent: {dest_ip}:{dest_port} -> {src_ip}:{src_port} Server Hello")
+        
         for port in local_ports:
             if port != bind_port:
                 send_data(port, frame)
+        
         time.sleep(1.5)
-        #Step 3: Server Certificate & Key Exchange 
+        
+        # Generate server keys
         private_pem, public_pem, private_key, public_key = generate_server_key()
         tls_sessions[tls_conn_id]["keys"] = (private_pem, public_pem, private_key, public_key)
         
+        # Continue with certificate exchange
         pk_cert = {
             "type": "ServerCertificate",
             "cert": SERVER_CERTIFICATE,
             "publicKey": public_pem.decode() 
         }
-        tcp = f"[TLS] {dest_port} | {src_port} | {json.dumps(pk_cert)}"#size of key will cause fragmentation 
+        
+        tcp = f"[TLS] {dest_port} | {src_port} | {json.dumps(pk_cert)}"
         packet = f"{dest_ip} | {src_ip} | 0x00 | {250} | {tcp}"
         frame = f"{dest_mac} | {src_mac} | {254} | {packet}"
         print(f"[TLS] Sent: {dest_ip}:{dest_port} -> {src_ip}:{src_port} Server Certificate")
+        
         for port in local_ports:
             if port != bind_port:
                 send_data(port, frame)
                 
+        # If this is a downgrade attack, log information about vulnerabilities
+        if SSL_DOWNGRADE and tls_sessions[tls_conn_id].get("downgraded", False):
+            print("\n[DOWNGRADE ATTACK] Connection successfully downgraded:")
+            print(f"TLS Version: {server_hello['version']} (Vulnerable to POODLE, BEAST)")
+            print(f"Cipher Suite: {server_hello['cipher_suites']} (No Forward Secrecy)")
+            print("This connection would be susceptible to various attacks.")
+            print("In a real-world scenario, encrypted traffic could potentially be decrypted.\n")
+    
+    # Rest of your original tls_connection_receive function for handling other message types...
     elif payload["type"] == "ServerHello":
+        # Your existing ServerHello handling code...
         print(f"[TLS] received: {src_ip}:{src_port} -> {dest_ip}:{dest_port} Server Hello")
-        # tls_sessions[tls_conn_id] = {
-        #     "client_random": client_random,
-        #     "cipher_suite": None,
-        #     "server_random": None,
-        #     "premaster_secret": None,
-        #     "master_secret": None,
-        #     "TLS_version": None
-        # }
+        
+        # Check if this is a downgraded connection
+        if payload["version"] == "TLS 1.0" or payload["cipher_suites"] == "RSA":
+            print("[WARNING] Server offered downgraded security parameters:")
+            print(f"TLS Version: {payload['version']}")
+            print(f"Cipher Suite: {payload['cipher_suites']}")
+            print("This connection may be compromised by a downgrade attack.")
         
         tls_sessions[tls_conn_id]["TLS_version"] = payload["version"]
         tls_sessions[tls_conn_id]["server_random"] = payload["r1"]
         tls_sessions[tls_conn_id]["cipher_suite"] = payload["cipher_suites"]
         
-        #generate premaster secret key
+        # Generate premaster secret key
         premaster_secret = hashlib.sha256(str(random.randint(1, 100000)).encode()).digest()
         tls_sessions[tls_conn_id]["premaster_secret"] = premaster_secret
         print(f"[Client] Generated pre-master secret: {premaster_secret}")
-        #generate master secret key
+        
+        # Generate master secret key
         master_secret = derive_master_secret(premaster_secret, tls_sessions[tls_conn_id]["client_random"].encode(), payload["r1"].encode())
         tls_sessions[tls_conn_id]["master_secret"] = master_secret
         print(f"[Client] Generated master secret: {master_secret}")
+        print(tls_sessions[tls_conn_id]["TLS_version"])
     
     elif payload["type"] == "ServerCertificate":
         print(f"[TLS] received: {src_ip}:{src_port} -> {dest_ip}:{dest_port} Server Certificate")
@@ -790,6 +852,7 @@ def tls_connection_receive(message):
         packet = f"{dest_ip} | {src_ip} | 0x00 | {2 + len(json.dumps(server_finish))} | {tcp}"
         frame = f"{dest_mac} | {src_mac} | {6 + len(json.dumps(server_finish))} | {packet}"
         print(f"[TLS] Sent: {dest_ip}:{dest_port} -> {src_ip}:{src_port} Server Finish")
+        show_attack_results()
         for port in local_ports:
             if port != bind_port:
                 send_data(port, frame)
@@ -804,6 +867,7 @@ def tls_connection_receive(message):
         hmac_gen = generate_hmac(master_secret_clt, "ServerFinish")
         if hmac_gen == hmac_received:
             print(f"[Client] hmac generated matches hmac received")
+            
         
         global client_tls_con_id
         client_tls_con_id = tls_conn_id
@@ -907,6 +971,39 @@ def aes_decrypt_message(key, nonce, ciphertext):
     aesgcm = AESGCM(key)
     decrypted_text = aesgcm.decrypt(nonce, ciphertext, None)
     return decrypted_text.decode()
+
+def show_attack_results():
+    """Display what information could be obtained after a successful downgrade attack"""
+    if SSL_DOWNGRADE:
+        print("\n[DOWNGRADE ATTACK RESULTS]")
+        print("=" * 60)
+        print("Here's what an attacker might learn in a real-world scenario:")
+        
+        for conn_id, session in tls_sessions.items():
+            if session.get("downgraded", False):
+                src_ip, dest_ip, src_port, dest_port = conn_id
+                print(session)
+                print(f"\nConnection: {src_ip}:{src_port} <-> {dest_ip}:{dest_port}")
+                print(f"Original security parameters requested: {session.get('original_version', 'Unknown')}, {session.get('original_ciphers', 'Unknown')}")
+                print(f"Downgraded to: {session.get('downgraded_version', 'Unknown')}, {session.get('cipher_suite', 'Unknown')}")
+                
+                # Explain the vulnerabilities
+                if session.get("downgraded_version") == "TLS 1.0":
+                    print("\nTLS 1.0 Vulnerabilities:")
+                    print("- BEAST attack: Allows recovering HTTP cookies and authentication tokens")
+                    print("- POODLE attack: Can decrypt parts of the encrypted traffic")
+                
+                if session.get("cipher_suite") == "RSA":
+                    print("\nRSA Key Exchange Vulnerabilities:")
+                    print("- No forward secrecy: If server's private key is compromised in the future,")
+                    print("  all past encrypted traffic can be decrypted")
+                
+                # Show the master secret (which would be compromised in a real attack)
+                if session.get("master_secret"):
+                    print(f"\nMaster Secret (would be compromised): {session.get('master_secret').hex() if isinstance(session.get('master_secret'), bytes) else session.get('master_secret')}")
+        
+        print("\nMitigation: Always use TLS 1.2+ with strong cipher suites like ECDHE.")
+        print("=" * 60)
  
 if __name__ == '__main__':
 
