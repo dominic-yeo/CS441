@@ -2,6 +2,17 @@ import socket
 import threading
 import time
 import random
+import hashlib
+import json
+import hmac
+import base64
+import os
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 # ARP cache mapping IP to node MAC (for local delivery)
 ARP_Cache = {
@@ -20,6 +31,42 @@ NODE_PORT = {
 # The router’s fixed port for inter-subnet traffic
 ROUTER_PORT = 10000
 
+# TCP flags
+TCP_SYN = 0x02
+TCP_ACK = 0x10
+TCP_SYN_ACK = TCP_SYN | TCP_ACK  # 0x12
+TCP_FIN = 0x01
+TCP_RST = 0x04
+
+# TCP connection states
+TCP_STATE_CLOSED = 0
+TCP_STATE_LISTEN = 1 
+TCP_STATE_SYN_SENT = 2
+TCP_STATE_SYN_RECEIVED = 3
+TCP_STATE_ESTABLISHED = 4
+TCP_STATE_FIN_WAIT_1 = 5
+TCP_STATE_FIN_WAIT_2 = 6
+TCP_STATE_CLOSING = 7
+TCP_STATE_TIME_WAIT = 8
+TCP_STATE_CLOSE_WAIT = 9
+TCP_STATE_LAST_ACK = 10
+
+# TCP connection table: {(source_ip, source_port, dest_ip, dest_port): state}
+tcp_connections = {}
+connected_clients = {}
+# TCP sequence numbers
+tcp_seq_num = {}
+tcp_ack_num = {}
+
+tls_sessions = {}
+client_tls_con_id = ()
+server_tls_con_id = ()
+SERVER_CERTIFICATE = """
+-----BEGIN CERTIFICATE-----
+MIIDETCCAfkCFCOkcQJ0z0cxMTmi61ADfCETPA5MMA0GCSqGSIb3DQEBCwUAMEUx
+CzAJBgNVBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRl
+-----END CERTIFICATE-----
+"""
 # Store infected nodes to prevent reinfection loops
 INFECTED = False
 
@@ -28,6 +75,13 @@ INFECTED = False
 memory = []
 fmessage = ""
 SOURCE_MAC = input("Enter node MAC address (e.g., N1, N2, or N3): ").strip()
+
+if SOURCE_MAC == "N2":
+    print("[TCP] Node is in TCP LISTEN state")
+    is_tcp_server = True
+    tcp_listen_port = 80  # Standard HTTP port
+else:
+    is_tcp_server = False
 
 # Ask the user for the node's MAC address.
 SOURCE_IP = ""
@@ -94,6 +148,10 @@ def logical_receive_data(data):
     Also check for ARP spoofing messages
     Packet format (frame): source_mac | dest_mac | <frame_length> | source_ip | dest_ip | 0x00 | <msg_length> | <message>
     """
+    if "[TLS]" in data: 
+        tls_connection_receive(data)
+        return 
+    
     tokens = data.split(" | ")
     if len(tokens) < 4:
         print("Malformed frame; dropping.")
@@ -105,7 +163,35 @@ def logical_receive_data(data):
     frame_src_mac = tokens[0]  # Sender's MAC
     frame_dest_mac = tokens[1]  # Recipient's MAC
     message = tokens[-1]        # Message payload
-
+    tcp_message = tokens[7:]
+    
+    #server receives client msg 
+    if len(server_tls_con_id) != 0:
+        if frame_src_ip == server_tls_con_id[1]:
+            k = tls_sessions[server_tls_con_id]["master_secret"]
+            message = json.loads(message)
+            print(f"Received encrypted message from {frame_src_ip}:{server_tls_con_id[-1]}: {message["enc_msg"]}")
+            nonce_bytes  = base64.b64decode(message["nonce"])
+            enc_msg_bytes = base64.b64decode(message["enc_msg"])
+            
+            decypted_msg = aes_decrypt_message(k,nonce_bytes,enc_msg_bytes)
+            print(f"Packet received from {frame_src_ip}: {decypted_msg}")
+            #source_ip, source_mac, dest_ip, message
+            logical_send_data(dest_ip, frame_dest_mac, frame_src_ip, f"[REPLY] {decypted_msg}")
+            return 
+    
+    #client receives server msg 
+    if len(client_tls_con_id) != 0:
+        if frame_src_ip == client_tls_con_id[1]:
+            k = tls_sessions[client_tls_con_id]["master_secret"]
+            message = json.loads(message)
+            print(f"Received encrypted message from {frame_src_ip}:{client_tls_con_id[-1]}: {message["enc_msg"]}")
+            nonce_bytes  = base64.b64decode(message["nonce"])
+            enc_msg_bytes = base64.b64decode(message["enc_msg"])
+            decypted_msg = aes_decrypt_message(k, nonce_bytes, enc_msg_bytes)
+            print(f"Packet received from {frame_src_ip}: {decypted_msg}")
+            return 
+    
     # Firewall check
     if frame_src_ip in FIREWALL_BLOCK:
         print(f"[Firewall] Packet from {frame_src_ip} blocked.")
@@ -115,7 +201,12 @@ def logical_receive_data(data):
     if WAF_ENABLED and waf_filter(message):
         if waf_filter(message):
             return
-        
+    
+    # Add TCP packet handling
+    if "[TCP]" in tcp_message[0]:
+        handle_tcp_packet(frame_src_ip, frame_src_mac, dest_ip, tcp_message)
+        return
+    
     if len(tokens) == 10:
         #IP packet: source IP | dest IP | protocol | dataLength | flag | offset | payload
         flag = tokens[-3]
@@ -245,6 +336,40 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
     else:
         local_ports = [9000, 9001, 10000]
 
+    #client to server communication after tls
+    if len(client_tls_con_id) != 0: 
+        if dest_ip == client_tls_con_id[1]:
+            k = tls_sessions[client_tls_con_id]["master_secret"]
+            nonce, enc_msg = aes_encrypt_message(k, message)
+            msg = {
+                "nonce": nonce,
+                "enc_msg":enc_msg 
+            }
+            tcp = f"{client_tls_con_id[2]} | {client_tls_con_id[3]} | {json.dumps(msg)}"
+            packet = f"{source_ip} | {dest_ip} | 0x00 | {2 + len(json.dumps(msg))} | {tcp}"
+            frame = f"{source_mac} | R1 | {6 + len(json.dumps(msg))} | {packet}"  
+        
+            for port in local_ports:
+                if port != bind_port:
+                    send_data(port, frame)
+            return 
+    #server to client communication after tls 
+    if len(server_tls_con_id) != 0: 
+        if dest_ip == server_tls_con_id[1]:
+            k = tls_sessions[server_tls_con_id]["master_secret"]
+            nonce, enc_msg = aes_encrypt_message(k, message)
+            msg = {
+                "nonce": nonce,
+                "enc_msg":enc_msg 
+            }
+            tcp = f"{server_tls_con_id[2]} | {server_tls_con_id[3]} | {json.dumps(msg)}"
+            packet = f"{source_ip} | {dest_ip} | 0x00 | {2 + len(json.dumps(msg))} | {tcp}"
+            frame = f"{source_mac} | R2 | {6 + len(json.dumps(msg))} | {packet}" 
+            for port in local_ports:
+                if port != bind_port:
+                    send_data(port, frame)
+            return
+    
     #Max Transmission Unit (MTU) =  256
     MTU = 256 
     #Fragmentation 
@@ -354,8 +479,435 @@ def logical_send_data(source_ip, source_mac, dest_ip, message):
             if port != bind_port:
                 send_data(port, frame)
 
+def tcp_send(source_ip, source_mac, dest_ip, source_port, dest_port, flags, seq_num=0, ack_num=0, data=""):
+    """Send a TCP packet with the specified flags and data."""
+    # Create TCP header
+    tcp_header = f"{source_port} | {dest_port} | {seq_num} | {ack_num} | {flags}"
+    
+    # Create the complete message with TCP header and data
+    tcp_message = f"[TCP] {tcp_header} | {data}"
+    
+    # Use the existing logical_send_data function to send the TCP message
+    logical_send_data(source_ip, source_mac, dest_ip, tcp_message)
+    
+    # Print debug information
+    flag_names = []
+    if flags & TCP_SYN:
+        flag_names.append("SYN")
+    if flags & TCP_ACK:
+        flag_names.append("ACK")
+    if flags & TCP_FIN:
+        flag_names.append("FIN")
+    if flags & TCP_RST:
+        flag_names.append("RST")
+    
+    flag_str = " + ".join(flag_names) if flag_names else "None"
+    print(f"[TCP] Sent: {source_ip}:{source_port} -> {dest_ip}:{dest_port} [Flags: {flag_str}] [SEQ: {seq_num}] [ACK: {ack_num}]")
+    
+def tcp_handshake_client(dest_ip, dest_port=80):
+    """Initiate a TCP handshake as a client."""
+    if SOURCE_MAC != "N1":
+        print("[TCP] Only N1 can act as TCP client in this simulation")
+        return
+    
+    # Generate initial sequence number (in a real TCP stack this would be random)
+    init_seq = random.randint(1000, 9999)
+    source_port = random.randint(10000, 65535)  # Ephemeral port
+    
+    # Store connection info
+    conn_id = (SOURCE_IP, source_port, dest_ip, dest_port)
+    tcp_connections[conn_id] = TCP_STATE_SYN_SENT
+    tcp_seq_num[conn_id] = init_seq
+    
+    print(f"[TCP] Initiating handshake with {dest_ip}:{dest_port} from port {source_port}")
+    
+    # Send SYN packet (Step 1 of handshake)
+    tcp_send(SOURCE_IP, SOURCE_MAC, dest_ip, source_port, dest_port, TCP_SYN, init_seq, 0)
 
+def handle_tcp_packet(src_ip, src_mac, dest_ip, tcp_data):
+    """Process received TCP packets and handle the handshake logic."""
+    # Parse TCP header
+    
+    
+    source_port = int(tcp_data[0].replace("[TCP]", ""))
+    dest_port = int(tcp_data[1])
+    seq_num = int(tcp_data[2])
+    ack_num = int(tcp_data[3])
+    flags = int(tcp_data[4])
+    data = tcp_data[5] if len(tcp_data) > 5 else ""
+    
+    # Print received TCP packet info
+    flag_names = []
+    if flags & TCP_SYN:
+        flag_names.append("SYN")
+    if flags & TCP_ACK:
+        flag_names.append("ACK")
+    if flags & TCP_FIN:
+        flag_names.append("FIN")
+    if flags & TCP_RST:
+        flag_names.append("RST")
+    
+    flag_str = " + ".join(flag_names) if flag_names else "None"
+    if SOURCE_MAC == "N2" or SOURCE_MAC == "N1":
+        print(f"[TCP] Received: {src_ip}:{source_port} -> {dest_ip}:{dest_port} [Flags: {flag_str}] [SEQ: {seq_num}] [ACK: {ack_num}]")
+    
+    # Handle server-side of handshake (N2)
+    if SOURCE_MAC == "N2" and is_tcp_server:
+        if flags == TCP_SYN:  # Step 1: Client SYN received
+            # Generate server sequence number
+            server_seq = random.randint(1000, 9999)
+            conn_id = (dest_ip, dest_port, src_ip, source_port)
+            
+            # Store connection info
+            tcp_connections[conn_id] = TCP_STATE_SYN_RECEIVED
+            tcp_seq_num[conn_id] = server_seq
+            tcp_ack_num[conn_id] = seq_num + 1
+            
+            # Send SYN-ACK (Step 2 of handshake)
+            tcp_send(dest_ip, SOURCE_MAC, src_ip, dest_port, source_port, TCP_SYN_ACK, server_seq, seq_num + 1)
+        
+        elif flags == TCP_ACK:  # Step 3: Client ACK received
+            conn_id = (dest_ip, dest_port, src_ip, source_port)
+            if conn_id in tcp_connections and tcp_connections[conn_id] == TCP_STATE_SYN_RECEIVED:
+                # Connection is now established
+                tcp_connections[conn_id] = TCP_STATE_ESTABLISHED
+                print(f"[TCP] Connection established with {src_ip}:{source_port}")
 
+            
+    # Handle client-side of handshake (N1)
+    elif SOURCE_MAC == "N1":
+        if flags == TCP_SYN_ACK:  # Step 2: Server SYN-ACK received
+            conn_id = (dest_ip, dest_port, src_ip, source_port)
+            if conn_id in tcp_connections and tcp_connections[conn_id] == TCP_STATE_SYN_SENT:
+                # Store received sequence number for future ACKs
+                tcp_ack_num[conn_id] = seq_num + 1
+                
+                # Send ACK (Step 3 of handshake)
+                tcp_send(dest_ip, SOURCE_MAC, src_ip, dest_port, source_port, TCP_ACK, 
+                         tcp_seq_num[conn_id] + 1, tcp_ack_num[conn_id])
+                
+                # Connection is now established
+                tcp_connections[conn_id] = TCP_STATE_ESTABLISHED
+                print(f"[TCP] Connection established with {src_ip}:{source_port}")
+                print("Establishing TLS connection")
+                tls_connection_send(src_ip, src_mac, dest_port, source_port)
+
+def tls_connection_send(dest_ip, dest_mac, src_port, dest_port):
+    #Step 1 Client Hello 
+    #Generate client random bytes (simulated).
+    client_random = hashlib.sha256(str(random.randint(1, 100000)).encode()).hexdigest()
+    tls_conn_id = (SOURCE_IP, dest_ip, src_port, dest_port) #(1A, 2A, rand, 80)
+    tls_sessions[tls_conn_id] = {
+        "client_random": client_random,
+        "cipher_suite": None,
+        "server_random": None,
+        "premaster_secret": None,
+        "master_secret": None,
+        "TLS_version": None
+    }
+    # Create Client Hello message
+    payload = {
+        "type": "ClientHello",
+        "version": "TLS 1.2",
+        "r0": client_random,
+        "cipher_suites": ["AES", "RSA", "ECDHE"] #simulated example 
+    }
+    tcp = f"[TLS] {src_port} | {dest_port} | {json.dumps(payload)}"
+    packet = f"{SOURCE_IP} | {dest_ip} | 0x00 | {2 + len(json.dumps(payload))} | {tcp}"
+    frame = f"{SOURCE_MAC} | {dest_mac} | {6 + len(json.dumps(payload))} | {packet}"
+    
+    print(f"[TLS] Sent: {SOURCE_IP}:{src_port} -> {dest_ip}:{dest_port} Client Hello")
+    send_data(ROUTER_PORT, frame)
+    return
+
+def tls_connection_receive(message): 
+    tokens = message.split(" | ")
+    # print(f"tokens: {tokens}")
+    src_port, dest_port, payload = int(tokens[-3].replace("[TLS]", "")), int(tokens[-2]), json.loads(tokens[-1])
+    src_mac, dest_mac, src_ip, dest_ip = tokens[0], tokens[1], tokens[3], tokens[4]
+    tls_conn_id = (dest_ip, src_ip, dest_port, src_port)
+    # print(F"tlsconID: {tls_conn_id}")
+    
+    if dest_ip[0] == "1":
+        local_ports = [8000, 10000]
+    else:
+        local_ports = [9000, 9001, 10000]
+    
+    if SOURCE_MAC == "N2" or SOURCE_MAC == "N3":
+        if dest_mac != SOURCE_MAC: 
+            print("Packet not addressed to me; dropped.")
+            return
+    
+    """
+    tcp = source port | dest port | payload
+    packet = f"{source_ip} | {dest_ip} | 0x00 | 2 + {len(payload)} | {tcp}"
+    frame = f"{source_mac} | {router_interface} | {4 + 2 + len(payload)} | {packet}"
+    """ 
+
+    if payload["type"] == "ClientHello":
+        print(f"[TLS] received: {src_ip}:{src_port} -> {dest_ip}:{dest_port} Client Hello")
+        r1 = hashlib.sha256(str(random.randint(1, 100000)).encode()).hexdigest()
+        tls_sessions[tls_conn_id] = {
+            "client_random": payload["r0"],
+            "cipher_suite": "AES",
+            "server_random": r1,
+            "premaster_secret": None,
+            "master_secret": None,
+            "keys": None
+        }
+        #Step 2: Server Hello 
+        server_hello = {
+            "type": "ServerHello",
+            "version": "TLS 1.2",
+            "r1": r1,
+            "cipher_suites": "AES"
+        }
+       
+        tcp = f"[TLS] {dest_port} | {src_port} | {json.dumps(server_hello)}"
+        packet = f"{dest_ip} | {src_ip} | 0x00 | {2+ len(json.dumps(server_hello))} | {tcp}"
+        frame = f"{dest_mac} | {src_mac} | {6 + len(json.dumps(server_hello))} | {packet}"  
+        print(f"[TLS] Sent: {dest_ip}:{dest_port} -> {src_ip}:{src_port} Server Hello")
+        for port in local_ports:
+            if port != bind_port:
+                send_data(port, frame)
+        time.sleep(1.5)
+        #Step 3: Server Certificate & Key Exchange 
+        private_pem, public_pem, private_key, public_key = generate_server_key()
+        tls_sessions[tls_conn_id]["keys"] = (private_pem, public_pem, private_key, public_key)
+        
+        pk_cert = {
+            "type": "ServerCertificate",
+            "cert": SERVER_CERTIFICATE,
+            "publicKey": public_pem.decode() 
+        }
+        tcp = f"[TLS] {dest_port} | {src_port} | {json.dumps(pk_cert)}"#size of key will cause fragmentation 
+        packet = f"{dest_ip} | {src_ip} | 0x00 | {250} | {tcp}"
+        frame = f"{dest_mac} | {src_mac} | {254} | {packet}"
+        print(f"[TLS] Sent: {dest_ip}:{dest_port} -> {src_ip}:{src_port} Server Certificate")
+        for port in local_ports:
+            if port != bind_port:
+                send_data(port, frame)
+                
+    elif payload["type"] == "ServerHello":
+        print(f"[TLS] received: {src_ip}:{src_port} -> {dest_ip}:{dest_port} Server Hello")
+        # tls_sessions[tls_conn_id] = {
+        #     "client_random": client_random,
+        #     "cipher_suite": None,
+        #     "server_random": None,
+        #     "premaster_secret": None,
+        #     "master_secret": None,
+        #     "TLS_version": None
+        # }
+        
+        tls_sessions[tls_conn_id]["TLS_version"] = payload["version"]
+        tls_sessions[tls_conn_id]["server_random"] = payload["r1"]
+        tls_sessions[tls_conn_id]["cipher_suite"] = payload["cipher_suites"]
+        
+        #generate premaster secret key
+        premaster_secret = hashlib.sha256(str(random.randint(1, 100000)).encode()).digest()
+        tls_sessions[tls_conn_id]["premaster_secret"] = premaster_secret
+        print(f"[Client] Generated pre-master secret: {premaster_secret}")
+        #generate master secret key
+        master_secret = derive_master_secret(premaster_secret, tls_sessions[tls_conn_id]["client_random"].encode(), payload["r1"].encode())
+        tls_sessions[tls_conn_id]["master_secret"] = master_secret
+        print(f"[Client] Generated master secret: {master_secret}")
+    
+    elif payload["type"] == "ServerCertificate":
+        print(f"[TLS] received: {src_ip}:{src_port} -> {dest_ip}:{dest_port} Server Certificate")
+        retrieved_public_key_pem = payload["publicKey"]
+        server_pk = serialization.load_pem_public_key(retrieved_public_key_pem.encode())
+        #step 4: Client Key Exchange
+        #public key encryption of s
+        s = tls_sessions[tls_conn_id]["premaster_secret"]
+        rsa_encrypted_s = rsa_encrypt_message(server_pk, s)
+        rsa_encrypted_s_base64 = base64.b64encode(rsa_encrypted_s).decode()
+        print(f'Encrypted S: {rsa_encrypted_s_base64}')     
+        
+        client_key_encryption = {
+            "type": "ClientKeyExchange",
+            "encrypted_s": rsa_encrypted_s_base64,
+        }
+        tcp = f"[TLS] {dest_port} | {src_port} | {json.dumps(client_key_encryption)}"
+        packet = f"{dest_ip} | {src_ip} | 0x00 | {2 + len(json.dumps(client_key_encryption))} | {tcp}"
+        frame = f"{dest_mac} | {src_mac} | {6 + len(json.dumps(client_key_encryption))} | {packet}"
+        print(f"[TLS] Sent: {dest_ip}:{dest_port} -> {src_ip}:{src_port} Client Key Exchange")
+        for port in local_ports:
+            if port != bind_port:
+                send_data(port, frame)
+        
+        time.sleep(1.5)
+        #step 5: Client Finish 
+        #HMAC using master secret K message: client Finish 
+        k = tls_sessions[tls_conn_id]["master_secret"]
+        hmac0 = generate_hmac(k, "ClientFinish")
+        client_finish = {
+            "type": "ClientFinish",
+            "hmac": hmac0,
+        }
+        tcp = f"[TLS] {dest_port} | {src_port} | {json.dumps(client_finish)}"
+        packet = f"{dest_ip} | {src_ip} | 0x00 | {2 + len(json.dumps(client_finish))} | {tcp}"
+        frame = f"{dest_mac} | {src_mac} | {6 + len(json.dumps(client_finish))} | {packet}"
+        print(f"[TLS] Sent: {dest_ip}:{dest_port} -> {src_ip}:{src_port} Client Finish")
+        for port in local_ports:
+            if port != bind_port:
+                send_data(port, frame)
+        
+    elif payload["type"] == "ClientKeyExchange":
+        print(f"[TLS] received: {src_ip}:{src_port} -> {dest_ip}:{dest_port} ClientKeyExchange")
+        #need rsa decrypt to get premaster S, and generate key K with S, r0 and r1 
+        #(private_pem, public_pem, private_key, public_key)
+        keys = tls_sessions[tls_conn_id]["keys"]
+        server_prk = keys[2]
+        rsa_encrypted_s_received = base64.b64decode(payload["encrypted_s"])
+        decrypted_s = rsa_decrypt_message(server_prk, rsa_encrypted_s_received)
+        tls_sessions[tls_conn_id]["premaster_secret"] = decrypted_s
+        
+        print(f"[Server] Decrypted pre-master key: {decrypted_s}")
+        
+        #generate master key K 
+        r0 = tls_sessions[tls_conn_id]["client_random"]
+        r1 = tls_sessions[tls_conn_id]["server_random"]
+        master_secret_svr = derive_master_secret(decrypted_s, r0.encode(), r1.encode())
+        print(f"[Server] Generated master secret: {master_secret_svr}")
+        tls_sessions[tls_conn_id]["master_secret"] = master_secret_svr
+    
+    elif payload["type"] == "ClientFinish":
+        print(f"[TLS] received: {src_ip}:{src_port} -> {dest_ip}:{dest_port} Client Finish")
+        #check for integrity using hashing
+        hmac_received = payload["hmac"]
+        master_secret_svr = tls_sessions[tls_conn_id]["master_secret"]
+        hmac_svr = generate_hmac(master_secret_svr, "ClientFinish")
+        if hmac_svr == hmac_received:
+            print(f"[Server] hmac generated matches hmac received")
+        
+        #step 6: Server finish 
+        hmac1 = generate_hmac(master_secret_svr, "ServerFinish")
+        server_finish = {
+            "type": "ServerFinish",
+            "hmac": hmac1
+        }
+        tcp = f"[TLS] {dest_port} | {src_port} | {json.dumps(server_finish)}"
+        packet = f"{dest_ip} | {src_ip} | 0x00 | {2 + len(json.dumps(server_finish))} | {tcp}"
+        frame = f"{dest_mac} | {src_mac} | {6 + len(json.dumps(server_finish))} | {packet}"
+        print(f"[TLS] Sent: {dest_ip}:{dest_port} -> {src_ip}:{src_port} Server Finish")
+        for port in local_ports:
+            if port != bind_port:
+                send_data(port, frame)
+        global server_tls_con_id
+        server_tls_con_id = tls_conn_id
+        # print(f"severconID: {server_tls_con_id}")
+        
+    elif payload["type"] == "ServerFinish":
+        print(f"[TLS] received: {src_ip}:{src_port} -> {dest_ip}:{dest_port} Server Finish")
+        hmac_received = payload["hmac"]
+        master_secret_clt = tls_sessions[tls_conn_id]["master_secret"]
+        hmac_gen = generate_hmac(master_secret_clt, "ServerFinish")
+        if hmac_gen == hmac_received:
+            print(f"[Client] hmac generated matches hmac received")
+        
+        global client_tls_con_id
+        client_tls_con_id = tls_conn_id
+        # print(f"clientconID: {client_tls_con_id}")
+
+# Add this function to send data over an established TCP connection
+def tcp_send_data(dest_ip, dest_port, data):
+    """Send data over an established TCP connection."""
+    if SOURCE_MAC != "N1":
+        print("[TCP] Only N1 can send data as TCP client in this simulation")
+        return
+    
+    # Find the connection in the connection table
+    source_port = None
+    conn_id = None
+    for conn in tcp_connections:
+        if conn[2] == dest_ip and conn[3] == dest_port and tcp_connections[conn] == TCP_STATE_ESTABLISHED:
+            source_port = conn[1]
+            conn_id = conn
+            break
+    
+    if conn_id is None:
+        print(f"[TCP] No established connection to {dest_ip}:{dest_port}")
+        return
+    
+    # Send the data
+    seq_num = tcp_seq_num[conn_id] + 1  # Increment sequence number
+    tcp_seq_num[conn_id] = seq_num      # Update sequence number
+    
+    tcp_send(SOURCE_IP, SOURCE_MAC, dest_ip, source_port, dest_port, TCP_ACK, seq_num, tcp_ack_num[conn_id], data)
+    print(f"[TCP] Data sent to {dest_ip}:{dest_port}: {data}")
+    
+def generate_server_key():
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=1024  # Reduced key size to 1024 bits
+    )
+
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+
+    public_key = private_key.public_key()
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+
+    return private_pem, public_pem, private_key, public_key
+
+# Encrypt a message using the public key
+def rsa_encrypt_message(public_key, message):
+    encrypted = public_key.encrypt(
+        message,  # Convert string to bytes
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+    return encrypted
+# Decrypt a message using the private key
+def rsa_decrypt_message(private_key, encrypted_message):
+    decrypted = private_key.decrypt(
+        encrypted_message,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+    return decrypted 
+
+def derive_master_secret(pre_master_secret, R0, R1):
+    hkdf = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,  # AES-256 requires a 32-byte key
+        salt=None,
+        info=b"master secret" + R0 + R1,  # Concatenated R0 and R1
+    )
+    master_secret = hkdf.derive(pre_master_secret)
+    return master_secret
+
+def generate_hmac(key, message):
+    """ Generate an HMAC for message using the secret key """
+    hmac_obj = hmac.new(key, message.encode(), hashlib.sha256)
+    return hmac_obj.hexdigest()   
+def aes_encrypt_message(key, plaintext):
+    """ Encrypts plaintext using AES-GCM with the given key """
+    aesgcm = AESGCM(key)
+    nonce = os.urandom(12)  # 12-byte nonce for AES-GCM
+    ciphertext = aesgcm.encrypt(nonce, plaintext.encode(), None)
+    nonce_b64 = base64.b64encode(nonce).decode()
+    ciphertext_b64 = base64.b64encode(ciphertext).decode()
+    return nonce_b64, ciphertext_b64
+
+def aes_decrypt_message(key, nonce, ciphertext):
+    """ Decrypts the ciphertext using AES-GCM with the given key """
+    aesgcm = AESGCM(key)
+    decrypted_text = aesgcm.decrypt(nonce, ciphertext, None)
+    return decrypted_text.decode()
+ 
 if __name__ == '__main__':
 
  
@@ -367,6 +919,7 @@ if __name__ == '__main__':
     print("Type 'release worm' to infect the network.")
     print("Type 'arpspoof <target_ip> <fake_mac>' to simulate ARP poisoning.")
     print("Type '<target_ip> [TEARDROP]' to simulate Teardrop Attack.")
+    print("Type 'tcp connect <dest_ip>' to initiate TCP handshake.")
 
     while True:
         user_input = input("> ").strip()
@@ -380,6 +933,26 @@ if __name__ == '__main__':
         elif "DDoS" in user_input:
             for ip in BOTNET:
                 logical_send_data(SOURCE_IP, SOURCE_MAC, ip, "DDoS " + user_input.split(" ")[1])
+        elif user_input.startswith("tcp connect"):
+            try:
+                _, _, dest_ip = user_input.split()
+                tcp_handshake_client(dest_ip)
+            except ValueError:
+                print("Invalid input. Please type 'tcp connect <dest_ip>'.")  
+        # In the main input loop, add this case
+        # Simplified version with default port
+        elif user_input.startswith("tcp send"):
+            try:
+                # Parse input as: tcp send <dest_ip> <data>
+                parts = user_input.split(' ', 3)
+                if len(parts) < 4:
+                    print("Invalid input. Please type 'tcp send <dest_ip> <data>'.")
+                else:
+                    _, _, dest_ip, data = parts
+                    dest_port = 80  # Default to HTTP port
+                    tcp_send_data(dest_ip, dest_port, data)
+            except ValueError:
+                print("Invalid input. Please type 'tcp send <dest_ip> <data>'.")     
         elif user_input.startswith("arpspoof"):
             tokens = user_input.split(" ")
             if len(tokens) != 3:
