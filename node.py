@@ -120,26 +120,51 @@ if SSL_DOWNGRADE:
         print("[!] The simulation will attempt to force connections to use weaker encryption")
 
 WAF_SECRET = b"supersecurekey"
+KNOWN_SIGNATURES = set()
+
+original_payload = "INFECTED BY "
+KNOWN_SIGNATURES.add(original_payload)
 
 def waf_filter(message):
     try:
         msg_obj = json.loads(message)
         if msg_obj.get("type") == "malware":
-            # expected_hmac = msg_obj.get("hmac", "")
-            # payload = msg_obj.get("payload", "")
+            expected_hmac = msg_obj.get("hmac", "")
+            payload = msg_obj.get("payload", "")
 
-            # recalculated = hmac.new(WAF_SECRET, payload.encode(), hashlib.sha256).hexdigest()
-            # if recalculated != expected_hmac:
-            #     print(f"[WAF] Invalid HMAC for malware payload; blocked")
-            #     return True
-            # print(f"[WAF] Valid malware payload signature; allowed")
-            print("[WAF] Malware detected. Blocking.")
-            return True
+            recalculated = hmac.new(WAF_SECRET, payload.encode(), hashlib.sha256).hexdigest()
+            if recalculated != expected_hmac:
+                print(f"[WAF] Invalid HMAC for malware payload; blocked")
+                return True
+            
+            for signature in KNOWN_SIGNATURES:
+                if payload.startswith(signature):
+                    print(f"[WAF] Known malware signature detected; blocked")
+                    return True
+            
+            print(f"[WAF] Unknown malware signature; allowing through")
+            return False
     except json.JSONDecodeError:
         # Not JSON - allow the message
         return False
     return False
     
+def create_polymorphic_worm(propagator_ip):
+    variants = [
+        f"INFECTED_BY_{propagator_ip}_{random.randint(1,10000)}",
+        f"HACKED{{{propagator_ip}}}",
+        f"{propagator_ip}-PAYLOAD-{random.randint(100, 999)}",
+        f"{random.choice(['X', 'Y', 'Z'])}_{propagator_ip}_INFECT"
+    ]
+    payload = random.choice(variants)
+    signature = hmac.new(WAF_SECRET, payload.encode(), hashlib.sha256).hexdigest()
+
+    worm_mesage = {
+        "type": "malware",
+        "payload": payload,
+        "hmac": signature
+    }
+    return json.dumps(worm_mesage)
 
 def create_signed_worm(propagator_ip):
     payload = f"INFECTED BY {propagator_ip}"
@@ -301,11 +326,14 @@ def logical_receive_data(data):
             if INFECTED:
                 print("[WORM] Node already infected; ignoring worm.")
                 return
-        
-            # Infection begins
+
             INFECTED = True
             print(f"[!] Worm detected from {frame_src_ip}! {SOURCE_IP} is now infected.")
-            propogator = payload.split("BY ")[1]
+
+            if payload.startswith("INFECTED BY "):
+                propogator = payload.split("BY ")[1]
+            else: 
+                propogator = frame_src_ip
             logical_send_data(SOURCE_IP, SOURCE_MAC, propogator, f"{SOURCE_IP} successfully infected.")
             propagate_worm(propogator)
             return
@@ -343,7 +371,14 @@ def propagate_worm(propogator):
         worm_payload = create_signed_worm(propogator)
         logical_send_data(SOURCE_IP, SOURCE_MAC, target_ip, worm_payload)
 
-
+def propagate_poly_worm(propogator):
+    for target_ip in ARP_Cache.keys():
+        if target_ip == SOURCE_IP:
+            continue
+        time.sleep(random.uniform(0.5, 2.0))  # Add delay for realism
+        print(f"[!] Spreading worm to {target_ip}...")
+        worm_payload = create_polymorphic_worm(propogator)
+        logical_send_data(SOURCE_IP, SOURCE_MAC, target_ip, worm_payload)
 
 def start_server(bind_port, host='0.0.0.0'):
     """Start a TCP server on the given port."""
@@ -1050,7 +1085,8 @@ if __name__ == '__main__':
     threading.Thread(target=start_server, args=(bind_port,), daemon=True).start()
 
     print("Enter messages in the format '<dest_ip> <data>' (e.g., '1A Hello World')")
-    print("Type 'release worm' to infect the network.")
+    print("Type 'release worm' to infect the network with a worm.")
+    print("Type 'release poly worm' to infect the network with polymorphic worm.")
     print("Type 'arpspoof <target_ip> <fake_mac>' to simulate ARP poisoning.")
     print("Type '<target_ip> [TEARDROP]' to simulate Teardrop Attack.")
     print("Type 'tcp connect <dest_ip>' to initiate TCP handshake.")
@@ -1064,6 +1100,10 @@ if __name__ == '__main__':
             print("[!] Releasing worm from this node...")
             print("[!] Once you have acquired a botnet, type 'DDoS <IP>' to execute DDoS")
             propagate_worm(SOURCE_IP)
+        elif user_input.lower() == "release poly worm":
+            print("[!] Releasing polymorphic worm from this node...")
+            print("[!] Once you have acquired a botnet, type 'DDoS <IP>' to execute DDoS")
+            propagate_poly_worm(SOURCE_IP)
         elif "DDoS" in user_input:
             for ip in BOTNET:
                 logical_send_data(SOURCE_IP, SOURCE_MAC, ip, "DDoS " + user_input.split(" ")[1])
