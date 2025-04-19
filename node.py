@@ -289,8 +289,8 @@ def logical_receive_data(data):
             reply_message = f"[PING REPLY] {message}"
             logical_send_data(dest_ip, SOURCE_MAC, frame_src_ip, reply_message)
         
-    elif SNIFFER_MODE and "[PING REPLY]" not in message:
-        print(f"Sniffed packet from {frame_src_ip}: {message}")
+    elif SNIFFER_MODE:
+        print(f"Sniffed packet from {frame_src_ip}: {data}")
     else:
         print("Packet not addressed to me; dropped.")
 
