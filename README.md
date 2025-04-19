@@ -34,6 +34,18 @@ A node can be put into sniffer mode to capture and display packets not directly 
 **Firewall:**
 Nodes (e.g., Node3) can be configured with firewall rules to block packets from specified sources.
 
+**IP fragmentation**
+IP fragmentation is the process of breaking a large IP packet into smaller fragments so that they can traverse networks. This process occurs when when the IP packet exceeds 256 bytes.
+
+**Teardrop Attack**
+A node (attacker) can send malformed, overlapping IP fragments with manipulated offset values to another node (victim). When the victim attempts to reassemble these fragments, it encounters errors or buffer overflows, causing the system to crash.
+
+**TCP/TLS Handshake**
+A node (client) can establish TCP/TLS handshake with the server to setup a secure channel for data transfer. 
+
+**SSL Downgrade**
+An attacker can perform a SSL downgrade attack by tricking the client and server into using an older, less secure protocol version.
+
 ## Files
 ### router.py:
 Implements the router’s functionality. It receives Ethernet frames, parses the embedded IP packet, updates the frame headers, and forwards packets to the appropriate subnet based on the destination IP.
