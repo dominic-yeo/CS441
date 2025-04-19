@@ -119,17 +119,37 @@ if SSL_DOWNGRADE:
         print("[!] SSL/TLS downgrade attack enabled")
         print("[!] The simulation will attempt to force connections to use weaker encryption")
 
-def waf_filter(message):
-    """
-    A simple WAF filter that detects worm payloads.
-    If a worm signature ("[WORM]") is found, the function returns True to indicate that
-    the packet should be blocked.
-    """
-    if "[WORM]" in message:
-        print("[WAF] Worm signature detected; blocking packet.")
-        return True
-    return False
+WAF_SECRET = b"supersecurekey"
 
+def waf_filter(message):
+    try:
+        msg_obj = json.loads(message)
+        if msg_obj.get("type") == "malware":
+            # expected_hmac = msg_obj.get("hmac", "")
+            # payload = msg_obj.get("payload", "")
+
+            # recalculated = hmac.new(WAF_SECRET, payload.encode(), hashlib.sha256).hexdigest()
+            # if recalculated != expected_hmac:
+            #     print(f"[WAF] Invalid HMAC for malware payload; blocked")
+            #     return True
+            # print(f"[WAF] Valid malware payload signature; allowed")
+            print("[WAF] Malware detected. Blocking.")
+            return True
+    except json.JSONDecodeError:
+        # Not JSON - allow the message
+        return False
+    return False
+    
+
+def create_signed_worm(propagator_ip):
+    payload = f"INFECTED BY {propagator_ip}"
+    signature = hmac.new(WAF_SECRET, payload.encode(), hashlib.sha256).hexdigest()
+    worm_message = {
+        "type": "malware",
+        "payload": payload,
+        "hmac": signature
+    }
+    return json.dumps(worm_message)
 
 def handle_client(conn, addr):
     """Handle incoming connections."""
@@ -175,7 +195,7 @@ def logical_receive_data(data):
         if frame_src_ip == server_tls_con_id[1]:
             k = tls_sessions[server_tls_con_id]["master_secret"]
             message = json.loads(message)
-            print(f"Received encrypted message from {frame_src_ip}:{server_tls_con_id[-1]}: {message["enc_msg"]}")
+            print(f"Received encrypted message from {frame_src_ip}:{server_tls_con_id[-1]}: {message['enc_msg']}")
             nonce_bytes  = base64.b64decode(message["nonce"])
             enc_msg_bytes = base64.b64decode(message["enc_msg"])
             
@@ -190,7 +210,7 @@ def logical_receive_data(data):
         if frame_src_ip == client_tls_con_id[1]:
             k = tls_sessions[client_tls_con_id]["master_secret"]
             message = json.loads(message)
-            print(f"Received encrypted message from {frame_src_ip}:{client_tls_con_id[-1]}: {message["enc_msg"]}")
+            print(f"Received encrypted message from {frame_src_ip}:{client_tls_con_id[-1]}: {message['enc_msg']}")
             nonce_bytes  = base64.b64decode(message["nonce"])
             enc_msg_bytes = base64.b64decode(message["enc_msg"])
             decypted_msg = aes_decrypt_message(k, nonce_bytes, enc_msg_bytes)
@@ -202,11 +222,11 @@ def logical_receive_data(data):
         print(f"[Firewall] Packet from {frame_src_ip} blocked.")
         return
     
-    # WAF check
-    if WAF_ENABLED and waf_filter(message):
+        # WAF check
+    if WAF_ENABLED:
         if waf_filter(message):
             return
-    
+
     # Add TCP packet handling
     if "[TCP]" in tcp_message[0]:
         handle_tcp_packet(frame_src_ip, frame_src_mac, dest_ip, tcp_message)
@@ -239,7 +259,8 @@ def logical_receive_data(data):
         else:
             print("Packet not addressed to me; dropped.")
         return     
-
+    
+        
     # Process ARP spoofing messages regardless of destination to simulate a realistic ARP poisoning attack where malicious ARP replies are brodcasted
     if message.startswith("[ARP SPOOF]"):
         # Expected format: "[ARP SPOOF] <IP> <MAC>"
@@ -265,16 +286,31 @@ def logical_receive_data(data):
             logical_send_data(SOURCE_IP, SOURCE_MAC, message.split(" ")[1], "you are under attack please crash")
             
     # Worm detection & propagation
-    if "[WORM]" in message and INFECTED == False:
-        if SOURCE_IP in message:
+    try:
+        msg_obj = json.loads(message)
+        if msg_obj.get("type") == "malware":
+            expected_hmac = msg_obj.get("hmac", "")
+            payload = msg_obj.get("payload", "")
+
+            # Verify signature
+            recalculated = hmac.new(WAF_SECRET, payload.encode(), hashlib.sha256).hexdigest()
+            if recalculated != expected_hmac:
+                print("[WORM] Invalid worm signature; rejecting message.")
+                return
+        
+            if INFECTED:
+                print("[WORM] Node already infected; ignoring worm.")
+                return
+        
+            # Infection begins
+            INFECTED = True
+            print(f"[!] Worm detected from {frame_src_ip}! {SOURCE_IP} is now infected.")
+            propogator = payload.split("BY ")[1]
+            logical_send_data(SOURCE_IP, SOURCE_MAC, propogator, f"{SOURCE_IP} successfully infected.")
+            propagate_worm(propogator)
             return
-        print(message)
-        INFECTED = True
-        print(f"[!] Worm detected from {frame_src_ip}! {dest_ip} is now infected!")
-        # Spread the worm only once
-        propogator = message.split("BY ")
-        logical_send_data(SOURCE_IP, SOURCE_MAC, propogator[1], SOURCE_IP + " successfully infected.")
-        propagate_worm(propogator[1])
+    except json.JSONDecodeError:
+        pass  # Message is not a worm
 
     if "successfully infected" in message:
         BOTNET.add(message.split(" ")[0])
@@ -304,7 +340,8 @@ def propagate_worm(propogator):
             continue
         time.sleep(random.uniform(0.5, 2.0))  # Add delay for realism
         print(f"[!] Spreading worm to {target_ip}...")
-        logical_send_data(SOURCE_IP, SOURCE_MAC, target_ip, "[WORM] INFECTED BY " + propogator)
+        worm_payload = create_signed_worm(propogator)
+        logical_send_data(SOURCE_IP, SOURCE_MAC, target_ip, worm_payload)
 
 
 
