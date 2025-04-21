@@ -124,22 +124,23 @@ WAF_SECRET = b"supersecurekey"
 def waf_filter(message):
     try:
         msg_obj = json.loads(message)
-        if msg_obj.get("type") == "malware":
-            # expected_hmac = msg_obj.get("hmac", "")
-            # payload = msg_obj.get("payload", "")
+        expected_hmac = msg_obj.get("hmac", "")
+        payload = msg_obj.get("payload", "")
 
-            # recalculated = hmac.new(WAF_SECRET, payload.encode(), hashlib.sha256).hexdigest()
-            # if recalculated != expected_hmac:
-            #     print(f"[WAF] Invalid HMAC for malware payload; blocked")
-            #     return True
-            # print(f"[WAF] Valid malware payload signature; allowed")
+        # Verify HMAC
+        recalculated = hmac.new(WAF_SECRET, payload.encode(), hashlib.sha256).hexdigest()
+        if recalculated != expected_hmac:
+            print("[WAF] Invalid HMAC; message blocked.")
+            return True
+
+        # Check message type
+        if msg_obj.get("type") == "malware":
             print("[WAF] Malware detected. Blocking.")
             return True
     except json.JSONDecodeError:
         # Not JSON - allow the message
         return False
     return False
-    
 
 def create_signed_worm(propagator_ip):
     payload = f"INFECTED BY {propagator_ip}"
